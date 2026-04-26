@@ -165,6 +165,8 @@ def build_goods_flow_tables(
         label: str,
         source_layer: str | None = None,
         source_mod: str | None = None,
+        source_mode: str | None = None,
+        source_history: str | None = None,
     ) -> None:
         nodes.setdefault(
             node_id,
@@ -174,6 +176,8 @@ def build_goods_flow_tables(
                 "label": label,
                 "source_layer": source_layer,
                 "source_mod": source_mod,
+                "source_mode": source_mode,
+                "source_history": source_history,
             },
         )
 
@@ -185,6 +189,8 @@ def build_goods_flow_tables(
             building.name,
             building.source_layer,
             building.source_mod,
+            building.source_mode,
+            building.source_history,
         )
 
     for method in production_methods:
@@ -195,6 +201,8 @@ def build_goods_flow_tables(
             method.name,
             method.source_layer,
             method.source_mod,
+            method.source_mode,
+            method.source_history,
         )
         if method.building:
             building = building_by_name.get(method.building)
@@ -205,6 +213,8 @@ def build_goods_flow_tables(
                 method.building,
                 None if building is None else building.source_layer,
                 None if building is None else building.source_mod,
+                None if building is None else building.source_mode,
+                None if building is None else building.source_history,
             )
             edges.append(
                 {
@@ -291,7 +301,12 @@ def _load_buildings(directory: MergedDirectory) -> tuple[list[Building], list[Pr
         unique_methods = _unique_production_methods(entry.value)
         buildings.append(_building_from_entry(entry, unique_methods))
         inline_methods.extend(
-            _production_method_from_entry(method_entry, source_kind="inline", building=entry.key)
+            _production_method_from_entry(
+                method_entry,
+                source_kind="inline",
+                building=entry.key,
+                source_entry=entry,
+            )
             for method_entry in unique_methods
         )
     return buildings, inline_methods
@@ -326,7 +341,10 @@ def _unique_production_methods(block: CList) -> list[CEntry]:
 
 
 def _production_method_from_entry(
-    entry: MergedEntry | CEntry, source_kind: str, building: str | None
+    entry: MergedEntry | CEntry,
+    source_kind: str,
+    building: str | None,
+    source_entry: MergedEntry | None = None,
 ) -> ProductionMethod:
     block = _as_block(entry.value)
     inputs: list[GoodsInput] = []
@@ -337,7 +355,9 @@ def _production_method_from_entry(
         if isinstance(value, int | float):
             inputs.append(GoodsInput(goods=child.key, amount=float(value)))
 
-    source_file, source_line, source_layer, source_mod, source_mode, source_history = _source(entry)
+    source_file, source_line, source_layer, source_mod, source_mode, source_history = _source(
+        source_entry or entry
+    )
     return ProductionMethod(
         name=entry.key,
         category=_scalar_string(_last(block, "category")),
@@ -486,6 +506,8 @@ def _goods_flow_node_schema() -> dict[str, Any]:
         "label": pl.String,
         "source_layer": pl.String,
         "source_mod": pl.String,
+        "source_mode": pl.String,
+        "source_history": pl.String,
     }
 
 

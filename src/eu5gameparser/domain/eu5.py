@@ -6,7 +6,7 @@ from pathlib import Path
 import polars as pl
 
 from eu5gameparser.domain.buildings import BuildingData, load_building_data
-from eu5gameparser.domain.goods import GoodsData, load_goods_data
+from eu5gameparser.domain.goods import GoodsData, build_goods_summary, load_goods_data
 from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH
 
 
@@ -14,6 +14,7 @@ from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH
 class Eu5Data:
     buildings: pl.DataFrame
     goods: pl.DataFrame
+    goods_summary: pl.DataFrame
     production_methods: pl.DataFrame
     goods_flow_nodes: pl.DataFrame
     goods_flow_edges: pl.DataFrame
@@ -31,6 +32,7 @@ def load_eu5_data(
     return Eu5Data(
         buildings=building_data.buildings,
         goods=goods_data.goods,
+        goods_summary=build_goods_summary(goods_data.goods, building_data.production_methods),
         production_methods=building_data.production_methods,
         goods_flow_nodes=building_data.goods_flow_nodes,
         goods_flow_edges=building_data.goods_flow_edges,

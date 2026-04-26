@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 
+from eu5gameparser import build_goods_summary
 from eu5gameparser.config import ParserConfig
+from eu5gameparser.domain.buildings import load_building_data
 from eu5gameparser.domain.goods import load_goods_data
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
@@ -45,3 +47,20 @@ def test_goods_preserve_nested_maps_and_full_raw_data() -> None:
         "development_threshold",
         "wealth_impact_threshold",
     } == raw_keys
+
+
+def test_build_goods_summary_counts_inputs_outputs_and_provenance() -> None:
+    goods_data = load_goods_data(ParserConfig(game_root=FIXTURE_ROOT))
+    building_data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    summary = build_goods_summary(goods_data.goods, building_data.production_methods)
+
+    cotton = summary.filter(summary["name"] == "cotton").row(0, named=True)
+    assert cotton["input_method_count"] == 0
+    assert cotton["output_method_count"] == 0
+    assert cotton["provenance_state"] == "vanilla_exact"
+    assert cotton["provenance_source"] == "vanilla"
+
+    porcelain = summary.filter(summary["name"] == "porcelain").row(0, named=True)
+    assert porcelain["input_method_count"] == 0
+    assert porcelain["output_method_count"] == 0

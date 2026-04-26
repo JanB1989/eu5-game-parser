@@ -54,6 +54,111 @@ class GoodsData:
     warnings: list[str] = field(default_factory=list)
 
 
+def build_goods_summary(goods: pl.DataFrame, production_methods: pl.DataFrame) -> pl.DataFrame:
+    input_counts = _goods_count_table(production_methods, "input_goods", "input_method_count")
+    output_counts = (
+        production_methods.filter(pl.col("produced").is_not_null())
+        .group_by("produced")
+        .agg(pl.len().alias("output_method_count"))
+        .rename({"produced": "name"})
+    )
+    summary = (
+        goods.select(
+            [
+                "name",
+                "category",
+                "default_market_price",
+                "transport_cost",
+                "food",
+                "source_layer",
+                "source_mod",
+                "source_mode",
+                "source_history",
+            ]
+        )
+        .join(input_counts, on="name", how="left")
+        .join(output_counts, on="name", how="left")
+        .with_columns(
+            [
+                pl.col("input_method_count").fill_null(0).cast(pl.Int64),
+                pl.col("output_method_count").fill_null(0).cast(pl.Int64),
+                pl.struct(
+                    ["source_layer", "source_mod", "source_mode", "source_history"]
+                )
+                .map_elements(_provenance_state, return_dtype=pl.String)
+                .alias("provenance_state"),
+                pl.when(pl.col("source_mod").is_not_null())
+                .then(pl.col("source_mod"))
+                .otherwise(pl.col("source_layer"))
+                .fill_null("unknown")
+                .alias("provenance_source"),
+            ]
+        )
+        .select(
+            [
+                "name",
+                "category",
+                "input_method_count",
+                "output_method_count",
+                "default_market_price",
+                "transport_cost",
+                "food",
+                "provenance_state",
+                "provenance_source",
+                "source_layer",
+                "source_mod",
+                "source_mode",
+                "source_history",
+            ]
+        )
+        .sort(["name"])
+    )
+    return summary
+
+
+def _goods_count_table(
+    production_methods: pl.DataFrame, list_column: str, output_column: str
+) -> pl.DataFrame:
+    return (
+        production_methods.select(["name", list_column])
+        .explode(list_column)
+        .filter(pl.col(list_column).is_not_null())
+        .group_by(list_column)
+        .agg(pl.len().alias(output_column))
+        .rename({list_column: "name"})
+    )
+
+
+def _provenance_state(source: dict[str, Any]) -> str:
+    source_layer = source.get("source_layer")
+    source_mod = source.get("source_mod")
+    source_mode = source.get("source_mode")
+    source_history = source.get("source_history")
+    if not source_layer and not source_mod:
+        return "unknown"
+    history = _parse_source_history(source_history)
+    modes = {str(record.get("mode") or "").upper() for record in history}
+    if "INJECT" in modes or "TRY_INJECT" in modes:
+        return "merged"
+    if (source_layer == "vanilla" or source_mod is None) and len(history) <= 1:
+        return "vanilla_exact"
+    if source_mod is not None or source_layer != "vanilla":
+        return "mod_exact"
+    if source_mode == "CREATE":
+        return "vanilla_exact"
+    return "unknown"
+
+
+def _parse_source_history(source_history: str | None) -> list[dict[str, Any]]:
+    if not source_history:
+        return []
+    try:
+        parsed = json.loads(source_history)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def load_goods_data(
     config: ParserConfig | None = None,
     *,
