@@ -8,6 +8,7 @@ import polars as pl
 
 from eu5gameparser.clausewitz.syntax import CEntry, CList, Scalar, Value
 from eu5gameparser.config import ParserConfig
+from eu5gameparser.domain.goods import GoodsData, load_goods_data
 from eu5gameparser.load_order import (
     DEFAULT_LOAD_ORDER_PATH,
     DataProfile,
@@ -43,6 +44,8 @@ class ProductionMethod:
     output: float | None
     inputs: list[GoodsInput]
     no_upkeep: bool
+    required_pop_type: str | None
+    required_pop_amount: float | None
     source_kind: str
     source_file: str
     source_line: int
@@ -51,6 +54,8 @@ class ProductionMethod:
     source_mode: str
     source_history: str
     building: str | None = None
+    production_method_group: str | None = None
+    production_method_group_index: int | None = None
     potential: Any | None = None
     allow: Any | None = None
 
@@ -60,9 +65,11 @@ class Building:
     name: str
     category: str | None
     pop_type: str | None
+    employment_size: float | None
     max_levels: str | int | float | bool | None
     possible_production_methods: list[str]
     unique_production_methods: list[str]
+    unique_production_method_groups: list[list[str]]
     source_file: str
     source_line: int
     source_layer: str
@@ -88,8 +95,12 @@ def load_building_data(
     *,
     profile: str | DataProfile | None = None,
     load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
+    goods_data: GoodsData | None = None,
 ) -> BuildingData:
     profile_config = _resolve_profile(config, profile, load_order_path)
+    goods_data = goods_data or load_goods_data(
+        config, profile=profile_config, load_order_path=load_order_path
+    )
     categories_dir = load_merged_directory(profile_config, "building_categories")
     methods_dir = load_merged_directory(profile_config, "production_methods")
     buildings_dir = load_merged_directory(profile_config, "building_types")
@@ -97,8 +108,9 @@ def load_building_data(
     categories = _load_categories(categories_dir)
     global_methods = _load_global_production_methods(methods_dir)
     buildings, inline_methods = _load_buildings(buildings_dir)
+    generated_methods = _generate_rgo_methods(goods_data)
 
-    all_methods = [*global_methods, *inline_methods]
+    all_methods = [*global_methods, *inline_methods, *generated_methods]
     method_names = {method.name for method in all_methods}
     unresolved = sorted(
         {
@@ -126,8 +138,15 @@ def load_building_data(
         [_building_row(building) for building in buildings],
         schema=_building_schema(),
     )
+    price_by_good = _good_prices(goods_data)
+    employment_by_building = {
+        building.name: building.employment_size or 1.0 for building in buildings
+    }
     methods_df = pl.DataFrame(
-        [_production_method_row(method) for method in all_methods],
+        [
+            _production_method_row(method, price_by_good, employment_by_building)
+            for method in all_methods
+        ],
         schema=_production_method_schema(),
     )
     unresolved_df = pl.DataFrame(
@@ -298,29 +317,63 @@ def _load_buildings(directory: MergedDirectory) -> tuple[list[Building], list[Pr
     buildings: list[Building] = []
     inline_methods: list[ProductionMethod] = []
     for entry in directory.entries:
-        unique_methods = _unique_production_methods(entry.value)
-        buildings.append(_building_from_entry(entry, unique_methods))
-        inline_methods.extend(
-            _production_method_from_entry(
-                method_entry,
-                source_kind="inline",
-                building=entry.key,
-                source_entry=entry,
+        method_groups = _unique_production_method_groups(entry.value)
+        buildings.append(_building_from_entry(entry, method_groups))
+        for group_index, group in enumerate(method_groups):
+            inline_methods.extend(
+                _production_method_from_entry(
+                    method_entry,
+                    source_kind="inline",
+                    building=entry.key,
+                    source_entry=entry,
+                    production_method_group=f"{entry.key}:unique_production_methods:{group_index}",
+                    production_method_group_index=group_index,
+                )
+                for method_entry in group
             )
-            for method_entry in unique_methods
-        )
     return buildings, inline_methods
 
 
-def _building_from_entry(entry: MergedEntry, unique_methods: list[CEntry]) -> Building:
+def _generate_rgo_methods(goods_data: GoodsData) -> list[ProductionMethod]:
+    methods: list[ProductionMethod] = []
+    for good in goods_data.goods.filter(pl.col("category") == "raw_material").to_dicts():
+        methods.append(
+            ProductionMethod(
+                name=f"rgo_{good['name']}",
+                category=None,
+                produced=good["name"],
+                output=1.0,
+                inputs=[],
+                no_upkeep=False,
+                required_pop_type="laborers",
+                required_pop_amount=1.0,
+                source_kind="generated_rgo",
+                source_file=good["source_file"],
+                source_line=good["source_line"],
+                source_layer=good["source_layer"],
+                source_mod=good["source_mod"],
+                source_mode=good["source_mode"],
+                source_history=good["source_history"],
+                building=None,
+            )
+        )
+    return methods
+
+
+def _building_from_entry(entry: MergedEntry, method_groups: list[list[CEntry]]) -> Building:
     block = _as_block(entry.value)
+    unique_methods = [method for group in method_groups for method in group]
     return Building(
         name=entry.key,
         category=_scalar_string(_last(block, "category")),
         pop_type=_scalar_string(_last(block, "pop_type")),
+        employment_size=_scalar_float(_last(block, "employment_size")),
         max_levels=_scalar(_last(block, "max_levels")),
         possible_production_methods=_scalar_list(_last(block, "possible_production_methods")),
         unique_production_methods=[method.key for method in unique_methods],
+        unique_production_method_groups=[
+            [method.key for method in group] for group in method_groups
+        ],
         source_file=entry.source_file,
         source_line=entry.source_line,
         source_layer=entry.source_layer,
@@ -330,14 +383,14 @@ def _building_from_entry(entry: MergedEntry, unique_methods: list[CEntry]) -> Bu
     )
 
 
-def _unique_production_methods(block: CList) -> list[CEntry]:
-    methods: list[CEntry] = []
+def _unique_production_method_groups(block: CList) -> list[list[CEntry]]:
+    groups: list[list[CEntry]] = []
     for unique_block in block.values("unique_production_methods"):
         if isinstance(unique_block, CList):
-            methods.extend(
-                entry for entry in unique_block.entries if isinstance(entry.value, CList)
+            groups.append(
+                [entry for entry in unique_block.entries if isinstance(entry.value, CList)]
             )
-    return methods
+    return groups
 
 
 def _production_method_from_entry(
@@ -345,6 +398,8 @@ def _production_method_from_entry(
     source_kind: str,
     building: str | None,
     source_entry: MergedEntry | None = None,
+    production_method_group: str | None = None,
+    production_method_group_index: int | None = None,
 ) -> ProductionMethod:
     block = _as_block(entry.value)
     inputs: list[GoodsInput] = []
@@ -365,6 +420,8 @@ def _production_method_from_entry(
         output=_scalar_float(_last(block, "output")),
         inputs=inputs,
         no_upkeep=bool(_scalar(_last(block, "no_upkeep", False))),
+        required_pop_type=None,
+        required_pop_amount=None,
         source_kind=source_kind,
         source_file=source_file,
         source_line=source_line,
@@ -373,6 +430,8 @@ def _production_method_from_entry(
         source_mode=source_mode,
         source_history=source_history,
         building=building,
+        production_method_group=production_method_group,
+        production_method_group_index=production_method_group_index,
         potential=_to_python(_last(block, "potential")),
         allow=_to_python(_last(block, "allow")),
     )
@@ -418,9 +477,11 @@ def _building_row(building: Building) -> dict[str, Any]:
         "name": building.name,
         "category": building.category,
         "pop_type": building.pop_type,
+        "employment_size": building.employment_size,
         "max_levels": None if building.max_levels is None else str(building.max_levels),
         "possible_production_methods": building.possible_production_methods,
         "unique_production_methods": building.unique_production_methods,
+        "unique_production_method_groups": building.unique_production_method_groups,
         "source_file": building.source_file,
         "source_line": building.source_line,
         "source_layer": building.source_layer,
@@ -430,7 +491,12 @@ def _building_row(building: Building) -> dict[str, Any]:
     }
 
 
-def _production_method_row(method: ProductionMethod) -> dict[str, Any]:
+def _production_method_row(
+    method: ProductionMethod,
+    price_by_good: dict[str, float],
+    employment_by_building: dict[str, float],
+) -> dict[str, Any]:
+    metrics = _production_method_metrics(method, price_by_good, employment_by_building)
     return {
         "name": method.name,
         "category": method.category,
@@ -439,14 +505,81 @@ def _production_method_row(method: ProductionMethod) -> dict[str, Any]:
         "input_goods": [item.goods for item in method.inputs],
         "input_amounts": [item.amount for item in method.inputs],
         "no_upkeep": method.no_upkeep,
+        "required_pop_type": method.required_pop_type,
+        "required_pop_amount": method.required_pop_amount,
         "source_kind": method.source_kind,
         "building": method.building,
+        "production_method_group": method.production_method_group,
+        "production_method_group_index": method.production_method_group_index,
+        **metrics,
         "source_file": method.source_file,
         "source_line": method.source_line,
         "source_layer": method.source_layer,
         "source_mod": method.source_mod,
         "source_mode": method.source_mode,
         "source_history": method.source_history,
+    }
+
+
+def _production_method_metrics(
+    method: ProductionMethod,
+    price_by_good: dict[str, float],
+    employment_by_building: dict[str, float],
+) -> dict[str, float | list[str] | None]:
+    production_efficiency_modifier = 0.0
+    adjusted_output = (
+        None if method.output is None else method.output * (1.0 + production_efficiency_modifier)
+    )
+    population_basis = (
+        employment_by_building.get(method.building, 1.0)
+        if method.building is not None
+        else 1.0
+    )
+    if adjusted_output is None or population_basis == 0:
+        output_per_population = None
+    else:
+        output_per_population = adjusted_output / population_basis
+
+    missing_price_goods: list[str] = []
+    output_value = None
+    if method.produced is not None and adjusted_output is not None:
+        produced_price = price_by_good.get(method.produced)
+        if produced_price is None:
+            missing_price_goods.append(method.produced)
+        else:
+            output_value = adjusted_output * produced_price
+
+    input_cost = 0.0
+    for item in method.inputs:
+        input_price = price_by_good.get(item.goods)
+        if input_price is None:
+            missing_price_goods.append(item.goods)
+        else:
+            input_cost += item.amount * input_price
+    if any(item.goods in missing_price_goods for item in method.inputs):
+        input_cost = None
+
+    profit = None
+    if output_value is not None and input_cost is not None:
+        profit = output_value - input_cost
+
+    return {
+        "production_efficiency_modifier": production_efficiency_modifier,
+        "adjusted_output": adjusted_output,
+        "output_value": output_value,
+        "input_cost": input_cost,
+        "profit": profit,
+        "missing_price_goods": sorted(set(missing_price_goods)),
+        "population_basis": population_basis,
+        "output_per_population": output_per_population,
+    }
+
+
+def _good_prices(goods_data: GoodsData) -> dict[str, float]:
+    return {
+        row["name"]: row["default_market_price"]
+        for row in goods_data.goods.to_dicts()
+        if row["default_market_price"] is not None
     }
 
 
@@ -467,9 +600,11 @@ def _building_schema() -> dict[str, Any]:
         "name": pl.String,
         "category": pl.String,
         "pop_type": pl.String,
+        "employment_size": pl.Float64,
         "max_levels": pl.String,
         "possible_production_methods": pl.List(pl.String),
         "unique_production_methods": pl.List(pl.String),
+        "unique_production_method_groups": pl.List(pl.List(pl.String)),
         "source_file": pl.String,
         "source_line": pl.Int64,
         "source_layer": pl.String,
@@ -488,8 +623,20 @@ def _production_method_schema() -> dict[str, Any]:
         "input_goods": pl.List(pl.String),
         "input_amounts": pl.List(pl.Float64),
         "no_upkeep": pl.Boolean,
+        "required_pop_type": pl.String,
+        "required_pop_amount": pl.Float64,
         "source_kind": pl.String,
         "building": pl.String,
+        "production_method_group": pl.String,
+        "production_method_group_index": pl.Int64,
+        "production_efficiency_modifier": pl.Float64,
+        "adjusted_output": pl.Float64,
+        "output_value": pl.Float64,
+        "input_cost": pl.Float64,
+        "profit": pl.Float64,
+        "missing_price_goods": pl.List(pl.String),
+        "population_basis": pl.Float64,
+        "output_per_population": pl.Float64,
         "source_file": pl.String,
         "source_line": pl.Int64,
         "source_layer": pl.String,

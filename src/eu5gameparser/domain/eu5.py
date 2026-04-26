@@ -27,8 +27,10 @@ def load_eu5_data(
     profile: str = "merged_default",
     load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
 ) -> Eu5Data:
-    building_data = load_building_data(profile=profile, load_order_path=load_order_path)
     goods_data = load_goods_data(profile=profile, load_order_path=load_order_path)
+    building_data = load_building_data(
+        profile=profile, load_order_path=load_order_path, goods_data=goods_data
+    )
     return Eu5Data(
         buildings=building_data.buildings,
         goods=goods_data.goods,

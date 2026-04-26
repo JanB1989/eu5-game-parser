@@ -40,6 +40,19 @@ def test_selected_good_downstream_consumer_includes_outputs_and_amounts() -> Non
     assert _edge(graph, "production_method:stone_bricks", "good:masonry")["data"]["label"] == "0.5"
 
 
+def test_raw_material_good_includes_generated_rgo_producer() -> None:
+    data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    graph = build_good_flow_graph("cotton", data=data)
+
+    assert _node_ids(graph) >= {
+        "good:cotton",
+        "production_method:rgo_cotton",
+    }
+    assert _edge(graph, "production_method:rgo_cotton", "good:cotton")["data"]["label"] == "1"
+    assert _edge(graph, "production_method:rgo_cotton", "good:cotton")["data"]["amount"] == 1.0
+
+
 def test_depth_one_does_not_expand_newly_found_goods() -> None:
     data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
 

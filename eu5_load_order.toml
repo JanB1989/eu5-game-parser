@@ -6,7 +6,13 @@ id = "prosper_or_perish"
 name = "Prosper or Perish"
 root = "C:\\Users\\Anwender\\Documents\\Paradox Interactive\\Europa Universalis V\\mod\\Prosper or Perish (Population Growth & Food Rework)"
 
+[[mods]]
+id = "building_test"
+name = "BuildingTest"
+root = "C:\\Users\\Anwender\\Documents\\Paradox Interactive\\Europa Universalis V\\mod\\BuildingTest"
+
 [profiles]
 vanilla = ["vanilla"]
 prosper_or_perish = ["prosper_or_perish"]
-merged_default = ["vanilla", "prosper_or_perish"]
+building_test = ["vanilla", "building_test"]
+merged_default = ["vanilla", "prosper_or_perish", "building_test"]

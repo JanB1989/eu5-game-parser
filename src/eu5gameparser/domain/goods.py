@@ -203,7 +203,7 @@ def _good_from_entry(entry: MergedEntry) -> Good:
         color=_scalar_string(_last(block, "color")),
         default_market_price=_scalar_float(_last(block, "default_market_price")),
         transport_cost=_scalar_float(_last(block, "transport_cost"), DEFAULT_TRANSPORT_COST),
-        food=_scalar_float(_last(block, "food")),
+        food=_food_value(entry),
         block_rgo_upgrade=_scalar_bool(_last(block, "block_rgo_upgrade")),
         development_threshold=_scalar_float(_last(block, "development_threshold")),
         origin_in_old_world=_scalar_bool(_last(block, "origin_in_old_world")),
@@ -308,6 +308,26 @@ def _scalar_float(value: Value | None, default: float | None = None) -> float | 
     if isinstance(scalar, int | float):
         return float(scalar)
     return default
+
+
+def _food_value(entry: MergedEntry) -> float | None:
+    values = entry.value.values("food")
+    if not values:
+        return None
+    if _has_injected_history(entry):
+        total = 0.0
+        has_food = False
+        for value in values:
+            scalar = _scalar(value)
+            if isinstance(scalar, int | float):
+                total += float(scalar)
+                has_food = True
+        return total if has_food else None
+    return _scalar_float(values[-1])
+
+
+def _has_injected_history(entry: MergedEntry) -> bool:
+    return any(record.mode in {"INJECT", "TRY_INJECT"} for record in entry.source_history)
 
 
 def _scalar_list(value: Value | None) -> list[str]:

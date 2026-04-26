@@ -12,7 +12,14 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
 def test_load_goods_from_synthetic_fixture() -> None:
     data = load_goods_data(ParserConfig(game_root=FIXTURE_ROOT))
 
-    assert data.goods["name"].to_list() == ["cotton", "porcelain"]
+    assert data.goods["name"].to_list() == [
+        "cotton",
+        "stone",
+        "clay",
+        "masonry",
+        "gems",
+        "porcelain",
+    ]
 
     cotton = data.goods.filter(data.goods["name"] == "cotton").row(0, named=True)
     assert cotton["method"] == "farming"
@@ -57,7 +64,7 @@ def test_build_goods_summary_counts_inputs_outputs_and_provenance() -> None:
 
     cotton = summary.filter(summary["name"] == "cotton").row(0, named=True)
     assert cotton["input_method_count"] == 0
-    assert cotton["output_method_count"] == 0
+    assert cotton["output_method_count"] == 1
     assert cotton["provenance_state"] == "vanilla_exact"
     assert cotton["provenance_source"] == "vanilla"
 
