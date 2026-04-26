@@ -6,12 +6,27 @@ from typing import Any
 
 import polars as pl
 
-from eu5gameparser.clausewitz.parser import parse_file
-from eu5gameparser.clausewitz.syntax import CDocument, CEntry, CList, Scalar, Value
+from eu5gameparser.clausewitz.syntax import CEntry, CList, Scalar, Value
 from eu5gameparser.config import ParserConfig
-from eu5gameparser.scanner import iter_text_files
+from eu5gameparser.load_order import (
+    DEFAULT_LOAD_ORDER_PATH,
+    DataProfile,
+    GameLayer,
+    MergedDirectory,
+    MergedEntry,
+    load_merged_directory,
+    load_profile,
+)
 
-PRODUCTION_METHOD_METADATA = {"category", "produced", "output", "potential", "allow", "no_upkeep"}
+PRODUCTION_METHOD_METADATA = {
+    "allow",
+    "category",
+    "debug_max_profit",
+    "no_upkeep",
+    "output",
+    "potential",
+    "produced",
+}
 
 
 @dataclass(frozen=True)
@@ -31,6 +46,10 @@ class ProductionMethod:
     source_kind: str
     source_file: str
     source_line: int
+    source_layer: str
+    source_mod: str | None
+    source_mode: str
+    source_history: str
     building: str | None = None
     potential: Any | None = None
     allow: Any | None = None
@@ -46,6 +65,10 @@ class Building:
     unique_production_methods: list[str]
     source_file: str
     source_line: int
+    source_layer: str
+    source_mod: str | None
+    source_mode: str
+    source_history: str
 
 
 @dataclass(frozen=True)
@@ -60,11 +83,20 @@ class BuildingData:
     warnings: list[str] = field(default_factory=list)
 
 
-def load_building_data(config: ParserConfig | None = None) -> BuildingData:
-    config = config or ParserConfig.from_env()
-    categories = _load_categories(config.building_categories_dir)
-    global_methods = _load_global_production_methods(config.production_methods_dir)
-    buildings, inline_methods = _load_buildings(config.building_types_dir)
+def load_building_data(
+    config: ParserConfig | None = None,
+    *,
+    profile: str | DataProfile | None = None,
+    load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
+) -> BuildingData:
+    profile_config = _resolve_profile(config, profile, load_order_path)
+    categories_dir = load_merged_directory(profile_config, "building_categories")
+    methods_dir = load_merged_directory(profile_config, "production_methods")
+    buildings_dir = load_merged_directory(profile_config, "building_types")
+
+    categories = _load_categories(categories_dir)
+    global_methods = _load_global_production_methods(methods_dir)
+    buildings, inline_methods = _load_buildings(buildings_dir)
 
     all_methods = [*global_methods, *inline_methods]
     method_names = {method.name for method in all_methods}
@@ -82,43 +114,21 @@ def load_building_data(config: ParserConfig | None = None) -> BuildingData:
         for building, method in unresolved
     ]
     warnings.extend(f"duplicate production method {name}" for name in duplicates)
+    warnings.extend(categories_dir.warnings)
+    warnings.extend(methods_dir.warnings)
+    warnings.extend(buildings_dir.warnings)
 
     categories_df = pl.DataFrame(
         [_category_row(entry) for entry in categories],
-        schema={
-            "name": pl.String,
-            "source_file": pl.String,
-            "source_line": pl.Int64,
-        },
+        schema=_category_schema(),
     )
     buildings_df = pl.DataFrame(
         [_building_row(building) for building in buildings],
-        schema={
-            "name": pl.String,
-            "category": pl.String,
-            "pop_type": pl.String,
-            "max_levels": pl.String,
-            "possible_production_methods": pl.List(pl.String),
-            "unique_production_methods": pl.List(pl.String),
-            "source_file": pl.String,
-            "source_line": pl.Int64,
-        },
+        schema=_building_schema(),
     )
     methods_df = pl.DataFrame(
         [_production_method_row(method) for method in all_methods],
-        schema={
-            "name": pl.String,
-            "category": pl.String,
-            "produced": pl.String,
-            "output": pl.Float64,
-            "input_goods": pl.List(pl.String),
-            "input_amounts": pl.List(pl.Float64),
-            "no_upkeep": pl.Boolean,
-            "source_kind": pl.String,
-            "building": pl.String,
-            "source_file": pl.String,
-            "source_line": pl.Int64,
-        },
+        schema=_production_method_schema(),
     )
     unresolved_df = pl.DataFrame(
         [{"building": building, "production_method": method} for building, method in unresolved],
@@ -146,22 +156,56 @@ def load_building_data(config: ParserConfig | None = None) -> BuildingData:
 def build_goods_flow_tables(
     buildings: list[Building], production_methods: list[ProductionMethod]
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    nodes: dict[str, dict[str, str]] = {}
+    nodes: dict[str, dict[str, str | None]] = {}
     edges: list[dict[str, Any]] = []
 
-    def add_node(node_id: str, node_type: str, label: str) -> None:
-        nodes.setdefault(node_id, {"id": node_id, "type": node_type, "label": label})
+    def add_node(
+        node_id: str,
+        node_type: str,
+        label: str,
+        source_layer: str | None = None,
+        source_mod: str | None = None,
+    ) -> None:
+        nodes.setdefault(
+            node_id,
+            {
+                "id": node_id,
+                "type": node_type,
+                "label": label,
+                "source_layer": source_layer,
+                "source_mod": source_mod,
+            },
+        )
 
+    building_by_name = {building.name: building for building in buildings}
     for building in buildings:
-        building_id = f"building:{building.name}"
-        add_node(building_id, "building", building.name)
+        add_node(
+            f"building:{building.name}",
+            "building",
+            building.name,
+            building.source_layer,
+            building.source_mod,
+        )
 
     for method in production_methods:
         method_id = f"production_method:{method.name}"
-        add_node(method_id, "production_method", method.name)
+        add_node(
+            method_id,
+            "production_method",
+            method.name,
+            method.source_layer,
+            method.source_mod,
+        )
         if method.building:
+            building = building_by_name.get(method.building)
             building_id = f"building:{method.building}"
-            add_node(building_id, "building", method.building)
+            add_node(
+                building_id,
+                "building",
+                method.building,
+                None if building is None else building.source_layer,
+                None if building is None else building.source_mod,
+            )
             edges.append(
                 {
                     "source": building_id,
@@ -171,6 +215,8 @@ def build_goods_flow_tables(
                     "building": method.building,
                     "production_method": method.name,
                     "goods": None,
+                    "source_layer": method.source_layer,
+                    "source_mod": method.source_mod,
                 }
             )
         for goods_input in method.inputs:
@@ -185,6 +231,8 @@ def build_goods_flow_tables(
                     "building": method.building,
                     "production_method": method.name,
                     "goods": goods_input.goods,
+                    "source_layer": method.source_layer,
+                    "source_mod": method.source_mod,
                 }
             )
         if method.produced:
@@ -199,89 +247,86 @@ def build_goods_flow_tables(
                     "building": method.building,
                     "production_method": method.name,
                     "goods": method.produced,
+                    "source_layer": method.source_layer,
+                    "source_mod": method.source_mod,
                 }
             )
 
-    nodes_df = pl.DataFrame(
-        list(nodes.values()),
-        schema={"id": pl.String, "type": pl.String, "label": pl.String},
-    )
-    edges_df = pl.DataFrame(
-        edges,
-        schema={
-            "source": pl.String,
-            "target": pl.String,
-            "kind": pl.String,
-            "amount": pl.Float64,
-            "building": pl.String,
-            "production_method": pl.String,
-            "goods": pl.String,
-        },
-    )
+    nodes_df = pl.DataFrame(list(nodes.values()), schema=_goods_flow_node_schema())
+    edges_df = pl.DataFrame(edges, schema=_goods_flow_edge_schema())
     return nodes_df, edges_df
 
 
-def _load_categories(root: Path) -> list[CEntry]:
-    return [entry for document in _parse_directory(root) for entry in document.entries]
+def _resolve_profile(
+    config: ParserConfig | None,
+    profile: str | DataProfile | None,
+    load_order_path: str | Path,
+) -> DataProfile:
+    if isinstance(profile, DataProfile):
+        return profile
+    if isinstance(profile, str):
+        return load_profile(profile, load_order_path)
+    config = config or ParserConfig.from_env()
+    return DataProfile(
+        name="vanilla",
+        layers=(GameLayer(id="vanilla", name="Vanilla", root=config.game_root, kind="vanilla"),),
+    )
 
 
-def _load_global_production_methods(root: Path) -> list[ProductionMethod]:
-    methods: list[ProductionMethod] = []
-    for document in _parse_directory(root):
-        for entry in document.entries:
-            if isinstance(entry.value, CList):
-                methods.append(
-                    _production_method_from_entry(entry, source_kind="global", building=None)
-                )
-    return methods
+def _load_categories(directory: MergedDirectory) -> list[MergedEntry]:
+    return directory.entries
 
 
-def _load_buildings(root: Path) -> tuple[list[Building], list[ProductionMethod]]:
+def _load_global_production_methods(directory: MergedDirectory) -> list[ProductionMethod]:
+    return [
+        _production_method_from_entry(entry, source_kind="global", building=None)
+        for entry in directory.entries
+    ]
+
+
+def _load_buildings(directory: MergedDirectory) -> tuple[list[Building], list[ProductionMethod]]:
     buildings: list[Building] = []
     inline_methods: list[ProductionMethod] = []
-    for document in _parse_directory(root):
-        for entry in document.entries:
-            if not isinstance(entry.value, CList):
-                continue
-            unique_methods = _unique_production_methods(entry.value)
-            buildings.append(_building_from_entry(entry, unique_methods))
-            inline_methods.extend(
-                _production_method_from_entry(
-                    method_entry, source_kind="inline", building=entry.key
-                )
-                for method_entry in unique_methods
-            )
+    for entry in directory.entries:
+        unique_methods = _unique_production_methods(entry.value)
+        buildings.append(_building_from_entry(entry, unique_methods))
+        inline_methods.extend(
+            _production_method_from_entry(method_entry, source_kind="inline", building=entry.key)
+            for method_entry in unique_methods
+        )
     return buildings, inline_methods
 
 
-def _parse_directory(root: Path) -> list[CDocument]:
-    return [parse_file(path) for path in iter_text_files(root)]
-
-
-def _building_from_entry(entry: CEntry, unique_methods: list[CEntry]) -> Building:
+def _building_from_entry(entry: MergedEntry, unique_methods: list[CEntry]) -> Building:
     block = _as_block(entry.value)
-    possible = _scalar_list(block.first("possible_production_methods"))
     return Building(
         name=entry.key,
-        category=_scalar_string(block.first("category")),
-        pop_type=_scalar_string(block.first("pop_type")),
-        max_levels=_scalar(block.first("max_levels")),
-        possible_production_methods=possible,
+        category=_scalar_string(_last(block, "category")),
+        pop_type=_scalar_string(_last(block, "pop_type")),
+        max_levels=_scalar(_last(block, "max_levels")),
+        possible_production_methods=_scalar_list(_last(block, "possible_production_methods")),
         unique_production_methods=[method.key for method in unique_methods],
-        source_file=str(entry.location.path or ""),
-        source_line=entry.location.line,
+        source_file=entry.source_file,
+        source_line=entry.source_line,
+        source_layer=entry.source_layer,
+        source_mod=entry.source_mod,
+        source_mode=entry.source_mode,
+        source_history=entry.source_history_json(),
     )
 
 
 def _unique_production_methods(block: CList) -> list[CEntry]:
-    unique_block = block.first("unique_production_methods")
-    if not isinstance(unique_block, CList):
-        return []
-    return [entry for entry in unique_block.entries if isinstance(entry.value, CList)]
+    methods: list[CEntry] = []
+    for unique_block in block.values("unique_production_methods"):
+        if isinstance(unique_block, CList):
+            methods.extend(
+                entry for entry in unique_block.entries if isinstance(entry.value, CList)
+            )
+    return methods
 
 
 def _production_method_from_entry(
-    entry: CEntry, source_kind: str, building: str | None
+    entry: MergedEntry | CEntry, source_kind: str, building: str | None
 ) -> ProductionMethod:
     block = _as_block(entry.value)
     inputs: list[GoodsInput] = []
@@ -292,20 +337,38 @@ def _production_method_from_entry(
         if isinstance(value, int | float):
             inputs.append(GoodsInput(goods=child.key, amount=float(value)))
 
+    source_file, source_line, source_layer, source_mod, source_mode, source_history = _source(entry)
     return ProductionMethod(
         name=entry.key,
-        category=_scalar_string(block.first("category")),
-        produced=_scalar_string(block.first("produced")),
-        output=_scalar_float(block.first("output")),
+        category=_scalar_string(_last(block, "category")),
+        produced=_scalar_string(_last(block, "produced")),
+        output=_scalar_float(_last(block, "output")),
         inputs=inputs,
-        no_upkeep=bool(_scalar(block.first("no_upkeep", False))),
+        no_upkeep=bool(_scalar(_last(block, "no_upkeep", False))),
         source_kind=source_kind,
+        source_file=source_file,
+        source_line=source_line,
+        source_layer=source_layer,
+        source_mod=source_mod,
+        source_mode=source_mode,
+        source_history=source_history,
         building=building,
-        potential=_to_python(block.first("potential")),
-        allow=_to_python(block.first("allow")),
-        source_file=str(entry.location.path or ""),
-        source_line=entry.location.line,
+        potential=_to_python(_last(block, "potential")),
+        allow=_to_python(_last(block, "allow")),
     )
+
+
+def _source(entry: MergedEntry | CEntry) -> tuple[str, int, str, str | None, str, str]:
+    if isinstance(entry, MergedEntry):
+        return (
+            entry.source_file,
+            entry.source_line,
+            entry.source_layer,
+            entry.source_mod,
+            entry.source_mode,
+            entry.source_history_json(),
+        )
+    return (str(entry.location.path or ""), entry.location.line, "vanilla", None, "CREATE", "[]")
 
 
 def _find_duplicates(methods: list[ProductionMethod]) -> list[str]:
@@ -318,11 +381,15 @@ def _find_duplicates(methods: list[ProductionMethod]) -> list[str]:
     return sorted(duplicates)
 
 
-def _category_row(entry: CEntry) -> dict[str, Any]:
+def _category_row(entry: MergedEntry) -> dict[str, Any]:
     return {
         "name": entry.key,
-        "source_file": str(entry.location.path or ""),
-        "source_line": entry.location.line,
+        "source_file": entry.source_file,
+        "source_line": entry.source_line,
+        "source_layer": entry.source_layer,
+        "source_mod": entry.source_mod,
+        "source_mode": entry.source_mode,
+        "source_history": entry.source_history_json(),
     }
 
 
@@ -336,6 +403,10 @@ def _building_row(building: Building) -> dict[str, Any]:
         "unique_production_methods": building.unique_production_methods,
         "source_file": building.source_file,
         "source_line": building.source_line,
+        "source_layer": building.source_layer,
+        "source_mod": building.source_mod,
+        "source_mode": building.source_mode,
+        "source_history": building.source_history,
     }
 
 
@@ -352,6 +423,83 @@ def _production_method_row(method: ProductionMethod) -> dict[str, Any]:
         "building": method.building,
         "source_file": method.source_file,
         "source_line": method.source_line,
+        "source_layer": method.source_layer,
+        "source_mod": method.source_mod,
+        "source_mode": method.source_mode,
+        "source_history": method.source_history,
+    }
+
+
+def _category_schema() -> dict[str, Any]:
+    return {
+        "name": pl.String,
+        "source_file": pl.String,
+        "source_line": pl.Int64,
+        "source_layer": pl.String,
+        "source_mod": pl.String,
+        "source_mode": pl.String,
+        "source_history": pl.String,
+    }
+
+
+def _building_schema() -> dict[str, Any]:
+    return {
+        "name": pl.String,
+        "category": pl.String,
+        "pop_type": pl.String,
+        "max_levels": pl.String,
+        "possible_production_methods": pl.List(pl.String),
+        "unique_production_methods": pl.List(pl.String),
+        "source_file": pl.String,
+        "source_line": pl.Int64,
+        "source_layer": pl.String,
+        "source_mod": pl.String,
+        "source_mode": pl.String,
+        "source_history": pl.String,
+    }
+
+
+def _production_method_schema() -> dict[str, Any]:
+    return {
+        "name": pl.String,
+        "category": pl.String,
+        "produced": pl.String,
+        "output": pl.Float64,
+        "input_goods": pl.List(pl.String),
+        "input_amounts": pl.List(pl.Float64),
+        "no_upkeep": pl.Boolean,
+        "source_kind": pl.String,
+        "building": pl.String,
+        "source_file": pl.String,
+        "source_line": pl.Int64,
+        "source_layer": pl.String,
+        "source_mod": pl.String,
+        "source_mode": pl.String,
+        "source_history": pl.String,
+    }
+
+
+def _goods_flow_node_schema() -> dict[str, Any]:
+    return {
+        "id": pl.String,
+        "type": pl.String,
+        "label": pl.String,
+        "source_layer": pl.String,
+        "source_mod": pl.String,
+    }
+
+
+def _goods_flow_edge_schema() -> dict[str, Any]:
+    return {
+        "source": pl.String,
+        "target": pl.String,
+        "kind": pl.String,
+        "amount": pl.Float64,
+        "building": pl.String,
+        "production_method": pl.String,
+        "goods": pl.String,
+        "source_layer": pl.String,
+        "source_mod": pl.String,
     }
 
 
@@ -359,6 +507,11 @@ def _as_block(value: Value) -> CList:
     if not isinstance(value, CList):
         raise TypeError(f"Expected block, got {type(value).__name__}")
     return value
+
+
+def _last(block: CList, key: str, default: Value | None = None) -> Value | None:
+    values = block.values(key)
+    return values[-1] if values else default
 
 
 def _scalar(value: Value | None) -> Scalar | None:

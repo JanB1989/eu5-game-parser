@@ -1,0 +1,40 @@
+INJECT:mason = {
+    pop_type = artisans
+    unique_production_methods = {
+        polished_stone = {
+            stone = 0.2
+            produced = luxury_masonry
+            output = 0.25
+            category = guild_input
+        }
+    }
+}
+
+REPLACE:bridge_infrastructure = {
+    max_levels = 2
+    pop_type = laborers
+    category = infrastructure_category
+    possible_production_methods = {
+        bridge_maintenance
+    }
+}
+
+TRY_REPLACE:missing_try_replace = {
+    category = missing_category
+}
+
+TRY_INJECT:missing_try_inject = {
+    category = missing_category
+}
+
+INJECT_OR_CREATE:created_by_inject = {
+    max_levels = 1
+    pop_type = peasants
+    category = infrastructure_category
+}
+
+REPLACE_OR_CREATE:created_by_replace = {
+    max_levels = 1
+    pop_type = laborers
+    category = basic_industry_category
+}

@@ -17,6 +17,7 @@ def test_load_building_tables_from_synthetic_fixture() -> None:
     assert set(data.production_methods["name"].to_list()) == {
         "shared_maintenance",
         "bridge_maintenance",
+        "monument_work",
         "stone_bricks",
     }
 
@@ -28,6 +29,7 @@ def test_load_building_tables_from_synthetic_fixture() -> None:
     assert stone_bricks["produced"] == "masonry"
     assert stone_bricks["input_goods"] == ["stone"]
     assert stone_bricks["input_amounts"] == [0.4]
+    assert "debug_max_profit" not in stone_bricks["input_goods"]
 
 
 def test_reports_unresolved_production_method_references() -> None:
@@ -54,15 +56,16 @@ def test_goods_flow_tables_include_goods_buildings_methods_and_edges() -> None:
     }.issubset(node_ids)
 
     edges = data.goods_flow_edges.to_dicts()
-    assert {
-        "source": "building:mason",
-        "target": "production_method:stone_bricks",
-        "kind": "uses_production_method",
-        "amount": None,
-        "building": "mason",
-        "production_method": "stone_bricks",
-        "goods": None,
-    } in edges
+    assert any(
+        edge["source"] == "building:mason"
+        and edge["target"] == "production_method:stone_bricks"
+        and edge["kind"] == "uses_production_method"
+        and edge["amount"] is None
+        and edge["building"] == "mason"
+        and edge["production_method"] == "stone_bricks"
+        and edge["goods"] is None
+        for edge in edges
+    )
     assert any(
         edge["source"] == "goods:stone"
         and edge["target"] == "production_method:stone_bricks"

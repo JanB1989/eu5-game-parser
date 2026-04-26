@@ -1,0 +1,47 @@
+import json
+from pathlib import Path
+
+from eu5gameparser.config import ParserConfig
+from eu5gameparser.domain.goods import load_goods_data
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
+
+
+def test_load_goods_from_synthetic_fixture() -> None:
+    data = load_goods_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    assert data.goods["name"].to_list() == ["cotton", "porcelain"]
+
+    cotton = data.goods.filter(data.goods["name"] == "cotton").row(0, named=True)
+    assert cotton["method"] == "farming"
+    assert cotton["category"] == "raw_material"
+    assert cotton["color"] == "goods_cotton"
+    assert cotton["default_market_price"] == 3.0
+    assert cotton["transport_cost"] == 1.0
+    assert cotton["origin_in_old_world"] is True
+    assert cotton["origin_in_new_world"] is None
+    assert cotton["custom_tags"] == ["old_world_goods", "textile_goods"]
+
+
+def test_goods_preserve_nested_maps_and_full_raw_data() -> None:
+    data = load_goods_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    porcelain = data.goods.filter(data.goods["name"] == "porcelain").row(0, named=True)
+    assert porcelain["transport_cost"] == 0.5
+    assert porcelain["development_threshold"] == 30.0
+    assert json.loads(porcelain["demand_add"]) == {"upper": 0.0005}
+    assert json.loads(porcelain["demand_multiply"]) == {"nobles": 20.0}
+    assert json.loads(porcelain["wealth_impact_threshold"]) == {"all": 1.1}
+
+    raw_data = json.loads(porcelain["data"])
+    raw_keys = {entry["key"] for entry in raw_data["entries"]}
+    assert {
+        "category",
+        "color",
+        "default_market_price",
+        "transport_cost",
+        "demand_add",
+        "demand_multiply",
+        "development_threshold",
+        "wealth_impact_threshold",
+    } == raw_keys

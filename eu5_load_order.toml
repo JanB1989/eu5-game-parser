@@ -1,0 +1,12 @@
+[paths]
+vanilla_root = "C:\\Games\\steamapps\\common\\Europa Universalis V"
+
+[[mods]]
+id = "prosper_or_perish"
+name = "Prosper or Perish"
+root = "C:\\Users\\Anwender\\Documents\\Paradox Interactive\\Europa Universalis V\\mod\\Prosper or Perish (Population Growth & Food Rework)"
+
+[profiles]
+vanilla = ["vanilla"]
+prosper_or_perish = ["prosper_or_perish"]
+merged_default = ["vanilla", "prosper_or_perish"]

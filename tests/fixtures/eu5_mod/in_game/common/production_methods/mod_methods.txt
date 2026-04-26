@@ -1,0 +1,10 @@
+INJECT:shared_maintenance = {
+    tools = 0.3
+}
+
+INJECT_OR_CREATE:mod_global_method = {
+    cotton = 0.5
+    produced = cloth
+    output = 1
+    category = building_maintenance
+}

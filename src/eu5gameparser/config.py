@@ -16,6 +16,7 @@ class ParserConfig:
     common_relative: Path = COMMON_RELATIVE
     building_categories_relative: Path = Path("building_categories")
     building_types_relative: Path = Path("building_types")
+    goods_relative: Path = Path("goods")
     production_methods_relative: Path = Path("production_methods")
 
     @classmethod
@@ -36,6 +37,10 @@ class ParserConfig:
         return self.common_dir / self.building_types_relative
 
     @property
+    def goods_dir(self) -> Path:
+        return self.common_dir / self.goods_relative
+
+    @property
     def production_methods_dir(self) -> Path:
         return self.common_dir / self.production_methods_relative
 
@@ -45,5 +50,6 @@ class ParserConfig:
             "common": self.common_dir,
             "building_categories": self.building_categories_dir,
             "building_types": self.building_types_dir,
+            "goods": self.goods_dir,
             "production_methods": self.production_methods_dir,
         }
