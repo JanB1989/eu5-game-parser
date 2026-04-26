@@ -1,0 +1,37 @@
+[project]
+name = "eu5gameparser"
+version = "0.1.0"
+description = "Fast, config-driven parsers for vanilla Europa Universalis V game files."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=1.36.1",
+    "typer>=0.20.0",
+]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.5.0",
+    "pytest>=9.0.0",
+    "ruff>=0.14.0",
+]
+
+[project.scripts]
+eu5parse = "eu5gameparser.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.9.24,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that read a local EU5 installation",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

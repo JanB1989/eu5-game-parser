@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+dist/
+build/
+*.egg-info/
+*.parquet
+*.csv
+.env
+.env.*
+
+# Do not vendor vanilla game content.
+game/
+Europa Universalis V/
