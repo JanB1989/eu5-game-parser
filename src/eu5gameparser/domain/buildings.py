@@ -541,11 +541,12 @@ def _production_method_metrics(
         output_per_population = adjusted_output / population_basis
 
     missing_price_goods: list[str] = []
-    output_value = None
+    output_value = 0.0
     if method.produced is not None and adjusted_output is not None:
         produced_price = price_by_good.get(method.produced)
         if produced_price is None:
             missing_price_goods.append(method.produced)
+            output_value = None
         else:
             output_value = adjusted_output * produced_price
 
@@ -562,6 +563,9 @@ def _production_method_metrics(
     profit = None
     if output_value is not None and input_cost is not None:
         profit = output_value - input_cost
+    profit_margin_percent = None
+    if profit is not None and input_cost is not None and input_cost > 0:
+        profit_margin_percent = (profit / input_cost) * 100.0
 
     return {
         "production_efficiency_modifier": production_efficiency_modifier,
@@ -569,6 +573,7 @@ def _production_method_metrics(
         "output_value": output_value,
         "input_cost": input_cost,
         "profit": profit,
+        "profit_margin_percent": profit_margin_percent,
         "missing_price_goods": sorted(set(missing_price_goods)),
         "population_basis": population_basis,
         "output_per_population": output_per_population,
@@ -634,6 +639,7 @@ def _production_method_schema() -> dict[str, Any]:
         "output_value": pl.Float64,
         "input_cost": pl.Float64,
         "profit": pl.Float64,
+        "profit_margin_percent": pl.Float64,
         "missing_price_goods": pl.List(pl.String),
         "population_basis": pl.Float64,
         "output_per_population": pl.Float64,

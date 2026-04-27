@@ -1,0 +1,24 @@
+TRY_INJECT:test_farming_advance = {
+	global_monthly_food_modifier = -0.05
+	global_rice_output_modifier = 0.15
+	ai_weight = { add = 10 }
+}
+
+mod_created_advance = {
+	age = age_3_discovery
+	icon = mod_icon
+	requires = test_farming_advance
+	unlock_unit = mod_unit
+	global_fish_output_modifier = 0.25
+}
+
+specific_polished_stone_early = {
+	age = age_2_renaissance
+	potential = { has_or_had_tag = TAG }
+	unlock_production_method = polished_stone
+}
+
+general_polished_stone_late = {
+	age = age_4_reformation
+	unlock_production_method = polished_stone
+}

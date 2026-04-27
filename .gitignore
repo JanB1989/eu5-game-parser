@@ -11,6 +11,10 @@ build/
 *.csv
 .env
 .env.*
+out/
+artifacts/
+reports/
+notebooks/out/
 
 # Do not vendor vanilla game content.
 game/
@@ -21,5 +25,7 @@ Europa Universalis V/
 !tests/fixtures/eu5/game/in_game/
 !tests/fixtures/eu5/game/in_game/common/
 tests/fixtures/eu5/game/in_game/common/*
+!tests/fixtures/eu5/game/in_game/common/advances/
+!tests/fixtures/eu5/game/in_game/common/advances/00_advances.txt
 !tests/fixtures/eu5/game/in_game/common/goods/
 !tests/fixtures/eu5/game/in_game/common/goods/00_test_goods.txt

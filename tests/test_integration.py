@@ -5,6 +5,7 @@ import pytest
 
 from eu5gameparser.clausewitz.parser import parse_file
 from eu5gameparser.config import ParserConfig
+from eu5gameparser.domain.advancements import load_advancement_data
 from eu5gameparser.domain.buildings import load_building_data
 from eu5gameparser.domain.goods import load_goods_data
 from eu5gameparser.graphs import build_good_flow_graph
@@ -21,8 +22,10 @@ def test_parse_real_install_when_enabled() -> None:
         pytest.skip(f"EU5 game root not found: {config.game_root}")
 
     data = load_building_data(config)
+    advancement_data = load_advancement_data(config)
     goods_data = load_goods_data(config)
 
+    assert advancement_data.advancements.height > 0
     assert data.categories.height > 0
     assert data.buildings.height > 0
     assert data.production_methods.height > 0
@@ -45,12 +48,21 @@ def test_parse_prosper_or_perish_when_enabled() -> None:
         pytest.skip("Set EU5_RUN_INTEGRATION=1 to parse the local EU5 install and mod.")
 
     data = load_building_data(profile="merged_default")
+    advancement_data = load_advancement_data(profile="merged_default")
     goods_data = load_goods_data(profile="merged_default")
 
     assert {"cookery", "victuals_market", "mining_village"}.issubset(
         set(data.buildings["name"].to_list())
     )
     assert any(name.startswith("pp_") for name in data.production_methods["name"].to_list())
+    assert "pp_herring_buss_north_sea" in set(advancement_data.advancements["name"].to_list())
+
+    food_advance = advancement_data.advancements.filter(
+        advancement_data.advancements["name"] == "food_advance_renaissance"
+    ).row(0, named=True)
+    food_modifiers = json.loads(food_advance["modifiers"])
+    assert food_modifiers["global_monthly_food_modifier"] == 0.0
+    assert food_modifiers["global_wheat_output_modifier"] == 0.1
 
     farming_village = data.buildings.filter(data.buildings["name"] == "farming_village").row(
         0, named=True

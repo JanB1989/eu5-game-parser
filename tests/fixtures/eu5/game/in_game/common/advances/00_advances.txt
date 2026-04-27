@@ -1,0 +1,55 @@
+test_farming_advance = {
+	age = age_1_traditions
+	icon = farming_icon
+	requires = root_advance
+	requires = agriculture_advance
+	unlock_production_method = test_crop_rotation
+	unlock_building = test_farm
+	global_monthly_food_modifier = 0.1
+	global_wheat_output_modifier = 0.2
+	depth = 0
+	ai_weight = { add = 5 }
+}
+
+test_craft_advance = {
+	age = age_2_renaissance
+	icon = craft_icon
+	global_build_buildings_cost = -0.05
+	global_wheat_output_modifier = -0.05
+}
+
+age_3_method_unlock = {
+	age = age_3_discovery
+	unlock_production_method = stone_bricks
+	unlock_production_method = early_method_late_building
+}
+
+age_4_method_unlock = {
+	age = age_4_reformation
+	unlock_production_method = clay_bricks
+	unlock_production_method = late_method_early_building
+}
+
+age_4_building_unlock = {
+	age = age_4_reformation
+	unlock_building = bridge_infrastructure
+	unlock_building = late_workshop
+}
+
+age_3_building_unlock = {
+	age = age_3_discovery
+	unlock_building = early_workshop
+}
+
+specific_only_method_unlock = {
+	age = age_1_traditions
+	potential = { has_or_had_tag = TAG }
+	unlock_production_method = gem_inlay
+	global_wheat_output_modifier = 0.03
+}
+
+specific_only_building_unlock = {
+	age = age_1_traditions
+	potential = { has_or_had_tag = TAG }
+	unlock_building = regional_workshop
+}

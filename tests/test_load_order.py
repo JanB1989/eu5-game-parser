@@ -54,12 +54,14 @@ def test_mod_file_override_and_database_entry_modes(tmp_path: Path) -> None:
         "stone_bricks",
         "clay_bricks",
         "plain_finish",
+        "stone_upkeep",
         "gem_inlay",
+        "masonry_rework",
         "polished_stone",
     ]
     assert mason["unique_production_method_groups"] == [
         ["stone_bricks", "clay_bricks"],
-        ["plain_finish", "gem_inlay"],
+        ["plain_finish", "stone_upkeep", "gem_inlay", "masonry_rework"],
         ["polished_stone"],
     ]
     assert mason["source_layer"] == "test_mod"

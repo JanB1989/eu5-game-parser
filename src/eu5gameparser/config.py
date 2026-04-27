@@ -16,6 +16,7 @@ class ParserConfig:
     common_relative: Path = COMMON_RELATIVE
     building_categories_relative: Path = Path("building_categories")
     building_types_relative: Path = Path("building_types")
+    advances_relative: Path = Path("advances")
     goods_relative: Path = Path("goods")
     production_methods_relative: Path = Path("production_methods")
 
@@ -37,6 +38,10 @@ class ParserConfig:
         return self.common_dir / self.building_types_relative
 
     @property
+    def advances_dir(self) -> Path:
+        return self.common_dir / self.advances_relative
+
+    @property
     def goods_dir(self) -> Path:
         return self.common_dir / self.goods_relative
 
@@ -48,6 +53,7 @@ class ParserConfig:
         return {
             "game_root": self.game_root,
             "common": self.common_dir,
+            "advances": self.advances_dir,
             "building_categories": self.building_categories_dir,
             "building_types": self.building_types_dir,
             "goods": self.goods_dir,

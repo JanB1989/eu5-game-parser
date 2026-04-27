@@ -4,7 +4,13 @@ import pytest
 
 from eu5gameparser.config import ParserConfig
 from eu5gameparser.domain.buildings import load_building_data
-from eu5gameparser.graphs import build_good_flow_graph, show_good_flow, write_good_flow_html
+from eu5gameparser.domain.eu5 import load_eu5_data
+from eu5gameparser.graphs import (
+    build_good_flow_graph,
+    show_good_flow,
+    write_good_flow_html,
+    write_goods_flow_explorer_html,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
 MOD_ROOT = Path(__file__).parent / "fixtures" / "eu5_mod"
@@ -135,6 +141,13 @@ def test_write_good_flow_html_creates_standalone_graph_file(tmp_path: Path) -> N
     assert '"padding": "12px"' in html
     assert "debug_max_profit" not in html
     assert "height: 100vh" in html
+    assert 'id="ageFilter"' in html
+    assert 'value="age_3_discovery"' in html
+    assert "const ageOrder" in html
+    assert "function applyAgeFilter" in html
+    assert "function filteredGraph" in html
+    assert "Specific unlocks" in html
+    assert "show_good_flow" not in html
 
 
 def test_graph_nodes_include_source_metadata() -> None:
@@ -147,6 +160,20 @@ def test_graph_nodes_include_source_metadata() -> None:
     assert "source_mod" in method["data"]
     assert method["data"]["provenance_state"] == "vanilla_exact"
     assert "building:mason" not in _node_ids(graph)
+
+
+def test_unfiltered_graph_from_eu5_data_includes_availability_metadata(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    graph = build_good_flow_graph("masonry", eu5_data=eu5_data)
+    method = _node(graph, "production_method:stone_bricks")
+
+    assert method["data"]["unlock_age"] == "age_3_discovery"
+    assert method["data"]["general_unlock_age"] == "age_3_discovery"
+    assert "specific_unlock_age" in method["data"]
+    assert method["data"]["availability_kind"] == "unlocked"
+    assert method["data"]["is_specific_only"] is False
 
 
 def test_graph_nodes_classify_mod_exact_and_merged_provenance(tmp_path: Path) -> None:
@@ -162,6 +189,337 @@ def test_graph_nodes_classify_mod_exact_and_merged_provenance(tmp_path: Path) ->
     assert created_method["data"]["provenance_state"] == "mod_exact"
 
 
+def test_graph_age_filter_hides_future_locked_methods(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    graph = build_good_flow_graph(
+        "masonry",
+        eu5_data=eu5_data,
+        max_age="age_3_discovery",
+    )
+
+    node_ids = _node_ids(graph)
+    assert "production_method:stone_bricks" in node_ids
+    assert "production_method:clay_bricks" not in node_ids
+    assert "production_method:polished_stone" not in node_ids
+    assert "production_method:default_late_building_method" not in node_ids
+    assert "production_method:early_method_late_building" not in node_ids
+    assert "production_method:late_method_early_building" not in node_ids
+
+
+def test_graph_age_filter_allows_methods_after_method_and_building_are_unlocked(
+    tmp_path: Path,
+) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="vanilla", load_order_path=load_order)
+
+    graph = build_good_flow_graph(
+        "stone",
+        eu5_data=eu5_data,
+        max_age="age_4_reformation",
+    )
+
+    node_ids = _node_ids(graph)
+    assert "production_method:default_late_building_method" in node_ids
+    assert "production_method:early_method_late_building" in node_ids
+    assert "production_method:late_method_early_building" in node_ids
+
+
+def test_graph_age_filter_can_include_specific_unlocks(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    graph = build_good_flow_graph(
+        "luxury_masonry",
+        eu5_data=eu5_data,
+        max_age="age_3_discovery",
+        include_specific_unlocks=True,
+    )
+
+    method = _node(graph, "production_method:polished_stone")
+    assert method["data"]["unlock_age"] == "age_2_renaissance"
+    assert method["data"]["availability_kind"] == "unlocked"
+
+
+def test_write_good_flow_html_preselects_requested_age(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    path = write_good_flow_html(
+        "masonry",
+        tmp_path / "masonry.html",
+        eu5_data=eu5_data,
+        max_age="age_3_discovery",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert 'const initialAge = "age_3_discovery";' in html
+    assert "applyAgeFilter()" in html
+    assert "production_method:clay_bricks" in html
+
+
+def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "goods_flow_explorer.html",
+        eu5_data=eu5_data,
+        good="masonry",
+        max_age="age_3_discovery",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert path.exists()
+    assert 'id="goodSelect"' not in html
+    assert 'id="entityType"' in html
+    assert 'id="entitySelect"' in html
+    assert 'list="entityOptions"' in html
+    assert 'id="entityOptions"' in html
+    assert '<option value="good">Goods</option>' in html
+    assert '<option value="building">Buildings</option>' in html
+    assert 'id="flowTab"' in html
+    assert 'id="modifierTab"' in html
+    assert "Output Modifiers" in html
+    assert 'id="modifierGoodSelect"' in html
+    assert 'id="modifierGoodOptions"' in html
+    assert 'value="masonry"' in html
+    assert "&quot;mason&quot;" in html
+    assert "function updateEntityOptions" in html
+    assert '"selector": ".building.selected"' not in html
+    assert 'id="ageFilter"' in html
+    assert 'id="specificUnlocks"' in html
+    assert 'id="depthInput"' in html
+    assert 'id="metricMode"' not in html
+    assert '<option value="goods">Goods</option>' not in html
+    assert '<option value="input_cost">Input cost</option>' not in html
+    assert '<option value="output_value">Output value</option>' not in html
+    assert '<option value="profit">Profit</option>' not in html
+    assert '<option value="profit_margin_percent">Profit %</option>' not in html
+    assert "function buildLocalGraph" in html
+    assert "function buildGoodGraph" in html
+    assert "function buildBuildingGraph" in html
+    assert "function buildModifierTimeline" in html
+    assert "function runModifierTimelineLayout" in html
+    assert "function modifierTimelinePositions" in html
+    assert "function setExplorerView" in html
+    assert "function formatModifierValue" in html
+    assert "function buildingVisible" in html
+    assert "function buildingRankedPositions" in html
+    assert "function runBuildingRankedLayout" in html
+    assert "function graphSpacingFactor" in html
+    assert "function scaledLayoutValue" in html
+    assert "function buildingInputGoodId" in html
+    assert "function buildingOutputGoodId" in html
+    assert "function addBuildingInputGoodNode" in html
+    assert "function addBuildingOutputGoodNode" in html
+    assert 'currentSelectionType() === "building"' in html
+    assert "nodeSep: scaledLayoutValue(130)" in html
+    assert "rankSep: scaledLayoutValue(260)" in html
+    assert "nodeSeparation: scaledLayoutValue(120)" in html
+    assert '"selector": ".building-ranked-edge"' in html
+    assert '"curve-style": "segments"' in html
+    assert '"edge-distances": "endpoints"' in html
+    assert '"source-endpoint": "data(source_endpoint)"' in html
+    assert '"target-endpoint": "data(target_endpoint)"' in html
+    assert '"curve-style": "round-taxi"' not in html
+    assert '"taxi-turn": "data(taxi_turn)"' not in html
+    assert 'cy.edges().addClass("building-ranked-edge")' in html
+    assert 'cy.edges().removeClass("building-ranked-edge")' in html
+    assert "function assignBuildingRankedEdgeAnchors" in html
+    assert "function anchorOffset" in html
+    assert "function edgeSortLabel" in html
+    assert "function applyExplorerGraph" in html
+    assert "function clearFocus" in html
+    assert "function focusElement" in html
+    assert 'cy.on("tap", "node", event => focusElement(event.target))' in html
+    assert 'cy.on("tap", "edge", event => focusElement(event.target))' in html
+    assert 'cy.on("tap", event =>' in html
+    assert "if (event.target === cy) clearFocus();" in html
+    assert 'removeClass("dimmed")' in html
+    assert 'addClass("focus-neighbor")' in html
+    assert 'addClass("focused")' in html
+    assert '"selector": ".dimmed"' in html
+    assert '"selector": ".focused"' in html
+    assert '"selector": ".focus-neighbor"' in html
+    assert '"selector": ".age-node"' in html
+    assert '"selector": ".advancement-node"' in html
+    assert '"selector": ".modifier-edge"' in html
+    assert '"opacity": 0.15' in html
+    assert '"opacity": 0.12' in html
+    assert "function metricLabel" not in html
+    assert "function methodMetricLines" in html
+    assert "function methodLabel" in html
+    assert "function methodBuildingContext" in html
+    assert "function referencedBuildings" in html
+    assert "function formatPercentValue" in html
+    assert 'if (value === null || value === undefined) return "n/a";' in html
+    assert "const network =" in html
+    assert '"output_modifiers":' in html
+    assert '"modifier_key": "global_wheat_output_modifier"' in html
+    assert '"modifier_key": "global_rice_output_modifier"' in html
+    assert '"has_potential": true' in html
+    assert 'modifier.good === selectedGood' in html
+    assert "&& (includeSpecific || !modifier.has_potential)" in html
+    assert 'label: `${age}\\nTotal: ${formatModifierValue(cumulative)}`' in html
+    assert 'source: advancementId' in html
+    assert 'target: modifierAgeId(modifier.age)' in html
+    assert 'const initialSelection = {"type": "good", "name": "masonry"};' in html
+    assert "const initialAge = \"age_3_discovery\";" in html
+    assert "const initialMetricMode" not in html
+    assert "Input: ${formatMetricValue(method.input_cost)}" in html
+    assert "Output: ${formatMetricValue(method.output_value)}" in html
+    assert "Profit: ${formatMetricValue(method.profit, true)}" in html
+    assert "Profit %: ${formatPercentValue(method.profit_margin_percent)}" in html
+    assert '"input_cost":' in html
+    assert '"output_value":' in html
+    assert '"profit":' in html
+    assert '"profit_margin_percent":' in html
+    assert '"buildings":' in html
+    assert '"effective_unlock_age":' in html
+    assert '"building_unlock_age":' in html
+    assert "method.effective_availability_kind" in html
+    assert "method.building_general_unlock_age" in html
+    assert "stone_bricks" in html
+    assert "clay_bricks" in html
+    assert "masonry" in html
+    assert "show_good_flow" not in html
+
+
+def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -> None:
+    data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    path = write_goods_flow_explorer_html(tmp_path / "explorer.html", data=data)
+    html = path.read_text(encoding="utf-8")
+
+    assert '"goods"' in html
+    assert '"buildings"' in html
+    assert '"methods"' in html
+    assert '"name": "stone"' in html
+    assert '"name": "masonry"' in html
+    assert '"name": "mason"' in html
+    assert '"name": "stone_bricks"' in html
+    assert '"name": "monument_work"' in html
+
+
+def test_goods_flow_explorer_can_preselect_building(tmp_path: Path) -> None:
+    data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "building_explorer.html",
+        data=data,
+        building="mason",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert 'const initialSelection = {"type": "building", "name": "mason"};' in html
+    assert "&quot;mason&quot;" in html
+    assert '"name": "mason"' in html
+    assert '"production_methods":' in html
+    assert "stone_bricks" in html
+    assert "stone" in html
+    assert "masonry" in html
+    assert "function buildBuildingGraph" in html
+    assert "addBuildingNode(nodes, building, true)" not in html
+    assert "buildingId(building.name)" not in html
+    assert "uses_production_method" not in html
+    assert "dummy" not in html
+    assert "invisible" not in html
+    assert "addMethodGoods(nodes, edges, method, building.name)" in html
+    assert "function methodBuildingContext" in html
+    assert "shared_maintenance" in html
+    assert 'methodNode.data.ranked_role = "production_method"' in html
+    assert "buildingInputGoodId(inputGood)" in html
+    assert "buildingOutputGoodId(method.produced)" in html
+    assert 'ranked_edge_role: "input"' in html
+    assert 'ranked_edge_role: "output"' in html
+    assert 'edge.data("source_endpoint"' in html
+    assert 'edge.data("target_endpoint"' in html
+    assert 'edge.data("target_endpoint", `-50% ${offset}`)' in html
+    assert 'edge.data("source_endpoint", `50% ${offset}`)' in html
+    assert '"input_good"' in html
+    assert '"output_good"' in html
+    assert "building_input_good:" in html
+    assert "building_output_good:" in html
+    assert "masonry_rework" in html
+
+
+def test_goods_flow_explorer_building_age_filter_keeps_selected_building(
+    tmp_path: Path,
+) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="vanilla", load_order_path=load_order)
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "late_building_explorer.html",
+        eu5_data=eu5_data,
+        building="late_workshop",
+        max_age="age_3_discovery",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert 'const initialSelection = {"type": "building", "name": "late_workshop"};' in html
+    assert "if (!buildingVisible(building, selectedAge, includeSpecific))" in html
+    assert "return { nodes: [], edges: [] };" in html
+    assert "&quot;late_workshop&quot;" in html
+    assert "default_late_building_method" in html
+
+
+def test_goods_flow_explorer_keeps_metric_mode_api_compatibility(tmp_path: Path) -> None:
+    data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "compat_explorer.html",
+        data=data,
+        metric_mode="profit",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert 'id="metricMode"' not in html
+    assert "const initialMetricMode" not in html
+    assert '"profit": 3.2' in html
+    assert '"profit_margin_percent": 400.0' in html
+    assert '"input_cost": 0.8' in html
+    assert '"output_value": 4.0' in html
+
+
+def test_goods_flow_explorer_renders_missing_metric_values_as_na(tmp_path: Path) -> None:
+    data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "missing_metric_explorer.html",
+        data=data,
+        metric_mode="profit",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert '"name": "shared_maintenance"' in html
+    assert '"profit": null' in html
+    assert '"profit_margin_percent": null' in html
+    assert 'if (value === null || value === undefined) return "n/a";' in html
+
+
+def test_goods_flow_explorer_rejects_unknown_metric_mode(tmp_path: Path) -> None:
+    data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    with pytest.raises(ValueError, match="metric_mode must be one of"):
+        write_goods_flow_explorer_html(
+            tmp_path / "bad_metric.html",
+            data=data,
+            metric_mode="margin",
+        )
+
+
+def test_trade_goods_notebook_uses_popout_explorer() -> None:
+    notebook = (Path(__file__).parents[1] / "notebooks" / "trade_goods.ipynb").read_text(
+        encoding="utf-8"
+    )
+
+    assert "write_goods_flow_explorer_html" in notebook or "open_goods_flow_explorer" in notebook
+    assert "show_good_flow" not in notebook
+
+
 def _load_order_file(tmp_path: Path) -> Path:
     path = tmp_path / "load_order.toml"
     path.write_text(
@@ -175,6 +533,7 @@ name = "Test Mod"
 root = "{MOD_ROOT.as_posix()}"
 
 [profiles]
+vanilla = ["vanilla"]
 merged_default = ["vanilla", "test_mod"]
 """.strip(),
         encoding="utf-8",
