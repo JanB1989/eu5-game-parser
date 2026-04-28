@@ -36,6 +36,7 @@ POP_UNEMPLOYED_COLUMNS = tuple(f"unemployed_{pop_type}" for pop_type in POP_TYPE
 class SavegameTables:
     save_metadata: pl.DataFrame
     markets: pl.DataFrame
+    market_food: pl.DataFrame
     market_goods: pl.DataFrame
     market_good_bucket_flows: pl.DataFrame
     locations: pl.DataFrame
@@ -51,6 +52,7 @@ class SavegameTables:
         return {
             "save_metadata": self.save_metadata,
             "markets": self.markets,
+            "market_food": self.market_food,
             "market_goods": self.market_goods,
             "market_good_bucket_flows": self.market_good_bucket_flows,
             "locations": self.locations,
@@ -294,6 +296,7 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         location_slug,
         _default_prices(eu5_data),
     )
+    market_food = _market_food_table(markets)
     buildings, building_methods = _building_tables(
         root.get("building_manager"),
         location_market,
@@ -324,6 +327,7 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
     return SavegameTables(
         save_metadata=pl.DataFrame([metadata], schema=_metadata_schema()),
         markets=markets,
+        market_food=market_food,
         market_goods=market_goods,
         market_good_bucket_flows=bucket_flows,
         locations=locations,
@@ -484,6 +488,61 @@ def _market_tables(
         pl.DataFrame(market_rows, schema=_markets_schema()),
         pl.DataFrame(good_rows, schema=market_goods_schema),
     )
+
+
+def _market_food_table(markets: pl.DataFrame) -> pl.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if not markets.is_empty():
+        for market in markets.to_dicts():
+            food = market.get("food")
+            food_max = market.get("food_max")
+            food_supply = market.get("food_supply")
+            food_consumption = market.get("food_consumption")
+            population = market.get("population")
+            rows.append(
+                {
+                    "market_id": market.get("market_id"),
+                    "market_center_slug": market.get("market_center_slug"),
+                    "center_location_id": market.get("center_location_id"),
+                    "food": food,
+                    "food_max": food_max,
+                    "food_fill_percent": _ratio_percent(food, food_max),
+                    "food_price": market.get("price"),
+                    "food_supply": food_supply,
+                    "food_consumption": food_consumption,
+                    "food_balance": _food_balance(food_supply, food_consumption),
+                    "food_not_traded": market.get("food_not_traded"),
+                    "missing": market.get("missing"),
+                    "population": population,
+                    "capacity": market.get("capacity"),
+                    "food_per_population": _safe_ratio(food, population),
+                    "months_of_food": _months_of_food(food, food_consumption),
+                }
+            )
+    return pl.DataFrame(rows, schema=_market_food_schema())
+
+
+def _safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or abs(denominator) <= FLOAT_TOLERANCE:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _ratio_percent(numerator: float | None, denominator: float | None) -> float | None:
+    ratio = _safe_ratio(numerator, denominator)
+    return None if ratio is None else ratio * 100.0
+
+
+def _food_balance(supply: float | None, consumption: float | None) -> float | None:
+    if supply is None or consumption is None:
+        return None
+    return float(supply) + float(consumption)
+
+
+def _months_of_food(food: float | None, consumption: float | None) -> float | None:
+    if food is None or consumption is None or consumption >= 0:
+        return None
+    return float(food) / abs(float(consumption))
 
 
 def _building_tables(
@@ -1385,6 +1444,27 @@ def _markets_schema() -> dict[str, Any]:
         "population": pl.Float64,
         "capacity": pl.Float64,
         "average_migration_attraction": pl.Float64,
+    }
+
+
+def _market_food_schema() -> dict[str, Any]:
+    return {
+        "market_id": pl.Int64,
+        "market_center_slug": pl.String,
+        "center_location_id": pl.Int64,
+        "food": pl.Float64,
+        "food_max": pl.Float64,
+        "food_fill_percent": pl.Float64,
+        "food_price": pl.Float64,
+        "food_supply": pl.Float64,
+        "food_consumption": pl.Float64,
+        "food_balance": pl.Float64,
+        "food_not_traded": pl.Float64,
+        "missing": pl.Float64,
+        "population": pl.Float64,
+        "capacity": pl.Float64,
+        "food_per_population": pl.Float64,
+        "months_of_food": pl.Float64,
     }
 
 

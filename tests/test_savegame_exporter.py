@@ -51,6 +51,7 @@ def test_load_savegame_tables_from_text_fixture(tmp_path: Path) -> None:
 
     assert tables.save_metadata.item(0, "date") == "1337.1.1"
     assert tables.markets.height == 1
+    assert tables.market_food.height == 1
     assert tables.market_goods.height == 3
     assert tables.market_good_bucket_flows.height == 11
     assert tables.locations.height == 3
@@ -63,6 +64,24 @@ def test_load_savegame_tables_from_text_fixture(tmp_path: Path) -> None:
     assert building["building_type"] == "mason"
     assert building["market_id"] == 1
     assert building["active_method_ids"] == ["masonry_rework", "stone_bricks"]
+
+    food = tables.market_food.row(0, named=True)
+    assert food["market_id"] == 1
+    assert food["market_center_slug"] == "stockholm"
+    assert food["center_location_id"] == 1
+    assert food["food"] == 100.0
+    assert food["food_max"] == 120.0
+    assert food["food_fill_percent"] == pytest.approx(100.0 / 120.0 * 100.0)
+    assert food["food_price"] == 0.5
+    assert food["food_supply"] == 8.0
+    assert food["food_consumption"] == -10.0
+    assert food["food_balance"] == -2.0
+    assert food["food_not_traded"] == 1.0
+    assert food["missing"] == 2.0
+    assert food["population"] == 42.0
+    assert food["capacity"] == 5.0
+    assert food["food_per_population"] == pytest.approx(100.0 / 42.0)
+    assert food["months_of_food"] == pytest.approx(10.0)
 
     assert tables.locations.select(pl.col("unemployed_total").sum()).item() == pytest.approx(
         14.0
@@ -261,6 +280,7 @@ def test_write_savegame_parquet_writes_all_tables(tmp_path: Path) -> None:
     expected = {
         "save_metadata",
         "markets",
+        "market_food",
         "market_goods",
         "market_good_bucket_flows",
         "locations",
@@ -288,17 +308,24 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "EU5 Savegame Market Explorer" in html
     assert "cytoscape.min.js" in html
     assert "Overview" in html
+    assert "Food Market" in html
     assert "Good Flow" in html
     assert "const payload =" in html
+    assert '"foodMarkets":' in html
     assert '"populationPools":' in html
     assert '"good_id": "masonry"' in html
     assert '"production_method": "stone_bricks"' in html
     assert "function graphElements" in html
     assert "function renderOverviewGraph" in html
+    assert "function renderFoodMarketTable" in html
+    assert "function renderFoodSummary" in html
+    assert "function renderFoodGraph" in html
+    assert "function compareFoodMarketRows" in html
     assert 'id="goodsHeaderRow"' in html
     assert 'id="goodsFooterRow"' in html
     assert 'id="labourPool"' in html
     assert "let overviewSort = { key: \"net\", direction: \"desc\", absolute: true }" in html
+    assert "let foodSort = { key: \"missing\", direction: \"desc\" }" in html
     assert "function formatOverviewNumber" in html
     assert "maximumFractionDigits: 0" in html
     assert "function setNumericCell" in html
@@ -316,11 +343,17 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "sort-indicator" in html
     assert "location_count" in html
     payload = _embedded_payload(html)
+    assert "foodMarkets" in payload
     assert "bucketFlows" in payload
     assert "rgoFlows" in payload
     assert "populationPools" in payload
     assert "employed_laborers" in payload["goods"][0]
     assert "unemployed_total" not in payload["goods"][0]
+    assert payload["foodMarkets"][0]["food_balance"] == -2.0
+    assert payload["foodMarkets"][0]["food_fill_percent"] == pytest.approx(
+        100.0 / 120.0 * 100.0
+    )
+    assert payload["foodMarkets"][0]["months_of_food"] == 10.0
     assert any(row.get("unemployed_total", 0) == 14.0 for row in payload["populationPools"])
     assert any(row.get("employed_laborers", 0) > 0 for row in payload["marketGoods"])
     assert all("unemployed_laborers" not in row for row in payload["marketGoods"])
@@ -363,6 +396,7 @@ def test_savegame_cli_writes_parquet_tables(tmp_path: Path) -> None:
     assert (output / "production_method_good_flows.parquet").exists()
     assert (output / "savegame_explorer.html").exists()
     assert (output / "market_good_bucket_flows.parquet").exists()
+    assert (output / "market_food.parquet").exists()
     assert (output / "rgo_flows.parquet").exists()
     assert (output / "production_method_population_flows.parquet").exists()
     assert (output / "market_population_pools.parquet").exists()

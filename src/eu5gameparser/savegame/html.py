@@ -30,6 +30,7 @@ def _payload(tables: SavegameTables) -> dict[str, Any]:
     return {
         "metadata": metadata,
         "markets": _market_rows(tables.markets),
+        "foodMarkets": _food_market_rows(tables.market_food),
         "goods": _goods_rows(market_goods, population_flows),
         "marketGoods": _selected_market_goods_rows(market_goods, population_flows),
         "bucketFlows": _bucket_flow_rows(tables.market_good_bucket_flows),
@@ -54,6 +55,12 @@ def _market_rows(markets: pl.DataFrame) -> list[dict[str, Any]]:
             "capacity",
         ]
     ).sort("market_id").to_dicts()
+
+
+def _food_market_rows(market_food: pl.DataFrame) -> list[dict[str, Any]]:
+    if market_food.is_empty():
+        return []
+    return market_food.sort("market_id").to_dicts()
 
 
 def _goods_rows(market_goods: pl.DataFrame, population_flows: pl.DataFrame) -> list[dict[str, Any]]:
@@ -346,6 +353,11 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       gap: 8px;
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }}
+    .food-summary {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }}
     .metric {{
       background: #f8fafc;
       border: 1px solid #dce5ef;
@@ -498,6 +510,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       <div class="spacer"></div>
       <div class="tabs">
         <button id="overviewTab" type="button" class="active">Overview</button>
+        <button id="foodTab" type="button">Food Market</button>
         <button id="flowTab" type="button">Good Flow</button>
       </div>
       <div class="controls">
@@ -511,7 +524,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     <main>
       <aside>
         <div class="panel-head">
-          <div class="metrics">
+          <div class="metrics" id="goodsMetrics">
             <div class="metric">
               <div class="metric-label">Supply</div>
               <div class="metric-value" id="supplyMetric">0</div>
@@ -525,6 +538,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
               <div class="metric-value" id="netMetric">0</div>
             </div>
           </div>
+          <div class="food-summary hidden" id="foodSummary"></div>
           <div class="meta" id="scopeLabel"></div>
           <div class="labour-pool" id="labourPool"></div>
         </div>
@@ -547,6 +561,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     const payload = {json.dumps(payload, ensure_ascii=False)};
     const goods = payload.goods || [];
     const markets = payload.markets || [];
+    const foodMarkets = payload.foodMarkets || [];
     const marketGoods = payload.marketGoods || [];
     const bucketFlows = payload.bucketFlows || [];
     const flows = payload.flows || [];
@@ -574,7 +589,24 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         numeric: true
       }}))
     ];
+    const foodColumns = [
+      {{ key: "market_center_slug", label: "Market", numeric: false }},
+      {{ key: "food", label: "Food", numeric: true }},
+      {{ key: "food_max", label: "Max", numeric: true }},
+      {{ key: "food_fill_percent", label: "Fill %", numeric: true }},
+      {{ key: "food_price", label: "Price", numeric: true }},
+      {{ key: "food_supply", label: "Supply", numeric: true }},
+      {{ key: "food_consumption", label: "Consumption", numeric: true }},
+      {{ key: "food_balance", label: "Balance", numeric: true }},
+      {{ key: "food_not_traded", label: "Not traded", numeric: true }},
+      {{ key: "missing", label: "Missing", numeric: true }},
+      {{ key: "population", label: "Population", numeric: true }},
+      {{ key: "capacity", label: "Capacity", numeric: true }},
+      {{ key: "food_per_population", label: "Food/pop", numeric: true }},
+      {{ key: "months_of_food", label: "Months", numeric: true }}
+    ];
     let overviewSort = {{ key: "net", direction: "desc", absolute: true }};
+    let foodSort = {{ key: "missing", direction: "desc" }};
     let currentView = "overview";
     let selectedGood = goods[0]?.good_id || "";
     let selectedMarketId = null;
@@ -670,6 +702,21 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       element.textContent = formatOverviewNumber(value);
       element.title = exactNumberTitle(value);
     }}
+    function formatFoodNumber(value) {{
+      if (value === null || value === undefined || value === "") return "n/a";
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "n/a";
+      return number.toLocaleString(undefined, {{
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 0
+      }});
+    }}
+    function setFoodNumber(element, value) {{
+      element.textContent = formatFoodNumber(value);
+      element.title = value === null || value === undefined || value === ""
+        ? ""
+        : exactNumberTitle(value);
+    }}
     function emptyPopulationFields() {{
       const fields = {{ employed_total: 0 }};
       for (const column of popColumns) fields[column.key] = 0;
@@ -722,6 +769,18 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       if (Number.isFinite(numeric)) return absolute ? Math.abs(numeric) : numeric;
       return String(value).toLocaleLowerCase();
     }}
+    function compareValues(leftValue, rightValue, direction) {{
+      if (leftValue === null && rightValue === null) return 0;
+      if (leftValue === null) return 1;
+      if (rightValue === null) return -1;
+      let result = 0;
+      if (typeof leftValue === "number" && typeof rightValue === "number") {{
+        result = leftValue - rightValue;
+      }} else {{
+        result = String(leftValue).localeCompare(String(rightValue));
+      }}
+      return direction === "asc" ? result : -result;
+    }}
     function compareOverviewRows(left, right) {{
       const leftValue = sortableValue(left, overviewSort.key, overviewSort.absolute);
       const rightValue = sortableValue(right, overviewSort.key, overviewSort.absolute);
@@ -739,8 +798,29 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       if (result === 0) return left.good_id.localeCompare(right.good_id);
       return overviewSort.direction === "asc" ? result : -result;
     }}
+    function compareFoodMarketRows(left, right) {{
+      const leftValue = sortableValue(left, foodSort.key);
+      const rightValue = sortableValue(right, foodSort.key);
+      let result = compareValues(leftValue, rightValue, foodSort.direction);
+      if (result === 0 && foodSort.key === "missing") {{
+        result = compareValues(
+          sortableValue(left, "months_of_food"),
+          sortableValue(right, "months_of_food"),
+          "asc"
+        );
+      }}
+      if (result === 0) {{
+        result = String(left.market_center_slug || "").localeCompare(
+          String(right.market_center_slug || "")
+        );
+      }}
+      return result;
+    }}
     function sortedOverviewRows() {{
       return rowsForScope().slice().sort(compareOverviewRows);
+    }}
+    function sortedFoodMarketRows() {{
+      return foodMarkets.slice().sort(compareFoodMarketRows);
     }}
     function setOverviewSort(key) {{
       if (overviewSort.key === key) {{
@@ -756,6 +836,15 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           direction: column && column.numeric ? "desc" : "asc",
           absolute: false
         }};
+      }}
+      render();
+    }}
+    function setFoodSort(key) {{
+      if (foodSort.key === key) {{
+        foodSort = {{ key, direction: foodSort.direction === "asc" ? "desc" : "asc" }};
+      }} else {{
+        const column = foodColumns.find(item => item.key === key);
+        foodSort = {{ key, direction: column && column.numeric ? "desc" : "asc" }};
       }}
       render();
     }}
@@ -775,6 +864,28 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         indicator.className = "sort-indicator";
         indicator.textContent = overviewSort.key === column.key
           ? (overviewSort.direction === "asc" ? "^" : "v")
+          : "";
+        button.append(label, indicator);
+        th.append(button);
+        header.append(th);
+      }}
+    }}
+    function renderFoodMarketHeader() {{
+      const header = document.getElementById("goodsHeaderRow");
+      header.replaceChildren();
+      for (const column of foodColumns) {{
+        const th = document.createElement("th");
+        th.className = column.numeric ? "numeric sortable" : "sortable";
+        const button = document.createElement("button");
+        button.className = "sort-header";
+        button.type = "button";
+        button.addEventListener("click", () => setFoodSort(column.key));
+        const label = document.createElement("span");
+        label.textContent = column.label;
+        const indicator = document.createElement("span");
+        indicator.className = "sort-indicator";
+        indicator.textContent = foodSort.key === column.key
+          ? (foodSort.direction === "asc" ? "^" : "v")
           : "";
         button.append(label, indicator);
         th.append(button);
@@ -808,6 +919,53 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         const td = document.createElement("td");
         td.className = "numeric";
         setNumericCell(td, totals[column.key]);
+        footer.append(td);
+      }}
+    }}
+    function summarizeFoodRows(rows) {{
+      const totals = {{
+        food: 0,
+        food_max: 0,
+        food_supply: 0,
+        food_consumption: 0,
+        food_balance: 0,
+        food_not_traded: 0,
+        missing: 0,
+        population: 0,
+        capacity: 0
+      }};
+      for (const row of rows) {{
+        for (const key of Object.keys(totals)) {{
+          totals[key] += Number(row[key] || 0);
+        }}
+      }}
+      totals.food_fill_percent = totals.food_max > 0
+        ? (totals.food / totals.food_max) * 100
+        : null;
+      totals.food_price = null;
+      totals.food_per_population = totals.population > 0
+        ? totals.food / totals.population
+        : null;
+      totals.months_of_food = totals.food_consumption < 0
+        ? totals.food / Math.abs(totals.food_consumption)
+        : null;
+      return totals;
+    }}
+    function renderFoodMarketFooter(rows) {{
+      const footer = document.getElementById("goodsFooterRow");
+      footer.replaceChildren();
+      const totals = summarizeFoodRows(rows);
+      for (const column of foodColumns) {{
+        if (!column.numeric) {{
+          const th = document.createElement("th");
+          th.textContent = "Total";
+          th.title = "Food market total";
+          footer.append(th);
+          continue;
+        }}
+        const td = document.createElement("td");
+        td.className = "numeric";
+        setFoodNumber(td, totals[column.key]);
         footer.append(td);
       }}
     }}
@@ -855,6 +1013,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       }}
     }}
     function renderTable() {{
+      if (currentView === "food") {{
+        renderFoodMarketTable();
+        return;
+      }}
       renderTableHeader();
       const body = document.getElementById("goodsBody");
       body.replaceChildren();
@@ -882,7 +1044,45 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         body.append(tr);
       }}
     }}
+    function renderFoodMarketTable() {{
+      renderFoodMarketHeader();
+      const body = document.getElementById("goodsBody");
+      body.replaceChildren();
+      const rows = sortedFoodMarketRows();
+      renderFoodMarketFooter(rows);
+      for (const row of rows) {{
+        const tr = document.createElement("tr");
+        if (row.market_id === selectedMarketId) tr.className = "selected";
+        tr.addEventListener("click", () => {{
+          selectedMarketId = row.market_id;
+          const market = markets.find(item => item.market_id === selectedMarketId);
+          document.getElementById("marketSearch").value = marketLabel(market);
+          render();
+        }});
+        for (const column of foodColumns) {{
+          const td = document.createElement("td");
+          if (column.numeric) td.className = "numeric";
+          if (column.numeric) {{
+            setFoodNumber(td, row[column.key]);
+          }} else {{
+            td.textContent = row[column.key] || `Market #${{row.market_id}}`;
+            td.title = td.textContent;
+          }}
+          tr.append(td);
+        }}
+        body.append(tr);
+      }}
+    }}
     function updateMetrics() {{
+      document.getElementById("goodsMetrics").classList.toggle("hidden", currentView === "food");
+      document.getElementById("labourPool").classList.toggle("hidden", currentView === "food");
+      document.getElementById("foodSummary").classList.toggle("hidden", currentView !== "food");
+      if (currentView === "food") {{
+        renderFoodSummary();
+        document.getElementById("scopeLabel").textContent =
+          `Food market · ${{marketLabel(selectedMarket())}}`;
+        return;
+      }}
       const row = selectedGoodRow() || {{ supply: 0, demand: 0, net: 0 }};
       setOverviewNumber(document.getElementById("supplyMetric"), row.supply);
       setOverviewNumber(document.getElementById("demandMetric"), row.demand);
@@ -890,6 +1090,36 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       renderLabourPool();
       document.getElementById("scopeLabel").textContent =
         `${{selectedGood || "No good"}} · ${{marketLabel(selectedMarket())}}`;
+    }}
+    function foodRowsForScope() {{
+      if (selectedMarketId === null) return foodMarkets;
+      return foodMarkets.filter(row => row.market_id === selectedMarketId);
+    }}
+    function renderFoodSummary() {{
+      const summary = summarizeFoodRows(foodRowsForScope());
+      const container = document.getElementById("foodSummary");
+      container.replaceChildren();
+      for (const item of [
+        ["Food", summary.food],
+        ["Max", summary.food_max],
+        ["Fill %", summary.food_fill_percent],
+        ["Supply", summary.food_supply],
+        ["Consumption", summary.food_consumption],
+        ["Balance", summary.food_balance],
+        ["Missing", summary.missing],
+        ["Population", summary.population]
+      ]) {{
+        const metric = document.createElement("div");
+        metric.className = "metric";
+        const label = document.createElement("div");
+        label.className = "metric-label";
+        label.textContent = item[0];
+        const value = document.createElement("div");
+        value.className = "metric-value";
+        setFoodNumber(value, item[1]);
+        metric.append(label, value);
+        container.append(metric);
+      }}
     }}
     function renderLabourPool() {{
       const pool = selectedPopulationPool();
@@ -1186,8 +1416,45 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         render();
       }});
     }}
+    function foodPressureColor(row) {{
+      if (Number(row.missing || 0) > 0) return "#fee2e2";
+      if (Number(row.food_fill_percent || 0) < 50) return "#fef3c7";
+      if (Number(row.food_balance || 0) < 0) return "#ffedd5";
+      return "#dcfce7";
+    }}
+    function renderFoodGraph() {{
+      const elements = sortedFoodMarketRows().slice(0, 35).map(row => ({{
+        data: {{
+          id: `food:${{row.market_id}}`,
+          label: [
+            row.market_center_slug || `Market #${{row.market_id}}`,
+            `Fill ${{formatFoodNumber(row.food_fill_percent)}}%`,
+            `Balance ${{formatFoodNumber(row.food_balance)}}`,
+            `Missing ${{formatFoodNumber(row.missing)}}`,
+            `Months ${{formatFoodNumber(row.months_of_food)}}`
+          ].join("\\n"),
+          color: foodPressureColor(row)
+        }},
+        classes: row.market_id === selectedMarketId ? "good" : ""
+      }}));
+      cy.elements().remove();
+      cy.add(elements);
+      cy.layout({{
+        name: "grid",
+        fit: true,
+        padding: 60,
+        animate: false
+      }}).run();
+      cy.nodes().on("tap", event => {{
+        selectedMarketId = Number(event.target.id().replace("food:", ""));
+        const market = markets.find(item => item.market_id === selectedMarketId);
+        document.getElementById("marketSearch").value = marketLabel(market);
+        render();
+      }});
+    }}
     function syncTabs() {{
       document.getElementById("overviewTab").classList.toggle("active", currentView === "overview");
+      document.getElementById("foodTab").classList.toggle("active", currentView === "food");
       document.getElementById("flowTab").classList.toggle("active", currentView === "flow");
     }}
     function render() {{
@@ -1195,6 +1462,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       updateMetrics();
       syncTabs();
       if (currentView === "overview") renderOverviewGraph();
+      else if (currentView === "food") renderFoodGraph();
       else renderGraph();
     }}
     document.getElementById("goodSearch").addEventListener("change", event => {{
@@ -1215,6 +1483,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     }});
     document.getElementById("overviewTab").addEventListener("click", () => {{
       currentView = "overview";
+      render();
+    }});
+    document.getElementById("foodTab").addEventListener("click", () => {{
+      currentView = "food";
       render();
     }});
     document.getElementById("flowTab").addEventListener("click", () => {{
