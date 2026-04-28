@@ -1299,6 +1299,16 @@ def _explorer_html(
       top: 0;
       z-index: 2;
     }}
+    .overview-table th:first-child {{
+      left: 0;
+      z-index: 4;
+    }}
+    .overview-table td:first-child {{
+      background: #ffffff;
+      left: 0;
+      position: sticky;
+      z-index: 1;
+    }}
     .overview-table th.sortable {{
       cursor: pointer;
       user-select: none;
@@ -1334,9 +1344,14 @@ def _explorer_html(
       white-space: nowrap;
     }}
     .overview-table .numeric {{
+      font-feature-settings: "tnum";
+      font-variant-numeric: tabular-nums;
       text-align: right;
     }}
     .overview-table tbody tr:hover {{
+      background: #f8fafc;
+    }}
+    .overview-table tbody tr:hover td:first-child {{
       background: #f8fafc;
     }}
     .legend {{
@@ -1688,14 +1703,22 @@ def _explorer_html(
       if (value === null || value === undefined || value === "") return "n/a";
       if (typeof value === "number") {{
         return Number.isFinite(value)
-          ? value.toLocaleString(undefined, {{ maximumFractionDigits: 2 }})
+          ? value.toLocaleString(undefined, {{ maximumFractionDigits: 0 }})
           : "n/a";
       }}
       return String(value);
     }}
+    function overviewExactTitle(value) {{
+      if (value === null || value === undefined || value === "") return "";
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return String(value);
+      return `Exact: ${{numeric.toLocaleString(undefined, {{ maximumFractionDigits: 2 }})}}`;
+    }}
     function formatOverviewCount(value) {{
       const numeric = Number(value);
-      return Number.isFinite(numeric) ? String(Math.trunc(numeric)) : "0";
+      return Number.isFinite(numeric) ? numeric.toLocaleString(undefined, {{
+        maximumFractionDigits: 0
+      }}) : "0";
     }}
     function goodsOverviewSortableValue(row, key) {{
       const value = row[key];
@@ -1770,6 +1793,7 @@ def _explorer_html(
           cell.textContent = key === "pm_output" || key === "pm_input"
             ? formatOverviewCount(good[key])
             : formatOverviewValue(good[key]);
+          cell.title = overviewExactTitle(good[key]);
           row.append(cell);
         }}
         tbody.append(row);

@@ -292,6 +292,10 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert "function setGoodsOverviewSort" in html
     assert "sort-header" in html
     assert "sort-indicator" in html
+    assert "maximumFractionDigits: 0" in html
+    assert "font-variant-numeric: tabular-nums" in html
+    assert ".overview-table td:first-child" in html
+    assert "cell.title = overviewExactTitle(good[key])" in html
     assert "transport cost" in html
     assert "Output Modifiers" in html
     assert 'id="modifierGoodSelect"' in html

@@ -569,6 +569,8 @@ def _flow_tables(
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     raw_flow_rows = _nominal_flow_rows(building_data, buildings, building_methods)
     rgo_rows = _rgo_nominal_flow_rows(locations)
+    raw_flow_rows_by_key = _index_flow_rows(raw_flow_rows)
+    rgo_rows_by_key = _index_flow_rows(rgo_rows)
     target_rows = _flow_target_rows(market_goods)
 
     flow_rows: list[dict[str, Any]] = []
@@ -578,18 +580,9 @@ def _flow_tables(
     for row in target_rows:
         key = (row["market_id"], row["good_id"], row["direction"])
         expected = row["expected_total"] or 0.0
-        detail_rows = [candidate for candidate in raw_flow_rows if _flow_key(candidate) == key]
+        detail_rows = raw_flow_rows_by_key.get(key, [])
         if row["direction"] == "output":
-            rgo_detail_rows = [
-                candidate
-                for candidate in rgo_rows
-                if (
-                    candidate["market_id"],
-                    candidate["good_id"],
-                    candidate["direction"],
-                )
-                == key
-            ]
+            rgo_detail_rows = rgo_rows_by_key.get(key, [])
             allocated = _allocate_output_rows(
                 row,
                 expected,
@@ -614,6 +607,15 @@ def _flow_tables(
         pl.DataFrame(rgo_flow_rows, schema=_rgo_flow_schema()),
         pl.DataFrame(check_rows, schema=_accounting_schema()),
     )
+
+
+def _index_flow_rows(
+    rows: list[dict[str, Any]],
+) -> dict[tuple[int, str, str], list[dict[str, Any]]]:
+    rows_by_key: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_key.setdefault(_flow_key(row), []).append(row)
+    return rows_by_key
 
 
 def _flow_key(row: dict[str, Any]) -> tuple[int, str, str]:

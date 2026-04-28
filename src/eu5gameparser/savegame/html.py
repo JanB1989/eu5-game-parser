@@ -360,6 +360,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       white-space: nowrap;
     }}
     th:first-child, td:first-child {{ text-align: left; }}
+    th.numeric, td.numeric {{
+      font-feature-settings: "tnum";
+      font-variant-numeric: tabular-nums;
+    }}
     th {{
       background: #f8fafc;
       color: #536173;
@@ -368,6 +372,19 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       text-transform: uppercase;
       top: 0;
       z-index: 1;
+    }}
+    th:first-child {{
+      left: 0;
+      z-index: 3;
+    }}
+    td:first-child {{
+      background: #ffffff;
+      left: 0;
+      position: sticky;
+      z-index: 2;
+    }}
+    tr:hover td:first-child, tr.selected td:first-child {{
+      background: #edf5ff;
     }}
     th.sortable {{
       cursor: pointer;
@@ -583,6 +600,17 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       const number = Number(value || 0);
       return number.toLocaleString(undefined, {{ maximumFractionDigits: 2 }});
     }}
+    function formatOverviewNumber(value) {{
+      const number = Number(value || 0);
+      return number.toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
+    }}
+    function exactNumberTitle(value) {{
+      return `Exact: ${{formatNumber(value)}}`;
+    }}
+    function setOverviewNumber(element, value) {{
+      element.textContent = formatOverviewNumber(value);
+      element.title = exactNumberTitle(value);
+    }}
     function emptyPopulationFields() {{
       const fields = {{ employed_total: 0 }};
       for (const column of popColumns) fields[column.key] = 0;
@@ -730,7 +758,13 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         for (const column of overviewColumns) {{
           const td = document.createElement("td");
           if (column.numeric) td.className = "numeric";
-          td.textContent = column.numeric ? formatNumber(row[column.key]) : row[column.key];
+          if (column.numeric) {{
+            td.textContent = formatOverviewNumber(row[column.key]);
+            td.title = exactNumberTitle(row[column.key]);
+          }} else {{
+            td.textContent = row[column.key];
+            td.title = row[column.key] || "";
+          }}
           tr.append(td);
         }}
         body.append(tr);
@@ -738,9 +772,9 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     }}
     function updateMetrics() {{
       const row = selectedGoodRow() || {{ supply: 0, demand: 0, net: 0 }};
-      document.getElementById("supplyMetric").textContent = formatNumber(row.supply);
-      document.getElementById("demandMetric").textContent = formatNumber(row.demand);
-      document.getElementById("netMetric").textContent = formatNumber(row.net);
+      setOverviewNumber(document.getElementById("supplyMetric"), row.supply);
+      setOverviewNumber(document.getElementById("demandMetric"), row.demand);
+      setOverviewNumber(document.getElementById("netMetric"), row.net);
       document.getElementById("scopeLabel").textContent =
         `${{selectedGood || "No good"}} · ${{marketLabel(selectedMarket())}}`;
     }}
@@ -984,9 +1018,9 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           id: `overview:${{row.good_id}}`,
           label: [
             row.good_id,
-            `S ${{formatNumber(row.supply)}} · D ${{formatNumber(row.demand)}}`,
-            `Net ${{formatNumber(row.net)}}`,
-            `Emp ${{formatNumber(row.employed_total)}}`
+            `S ${{formatOverviewNumber(row.supply)}} · D ${{formatOverviewNumber(row.demand)}}`,
+            `Net ${{formatOverviewNumber(row.net)}}`,
+            `Emp ${{formatOverviewNumber(row.employed_total)}}`
           ].join("\\n"),
           color: (row.net || 0) >= 0 ? "#dcfce7" : "#fee2e2"
         }},

@@ -81,6 +81,8 @@ def test_production_method_flows_reconcile_to_save_buckets(tmp_path: Path) -> No
     assert checks.height == 3
     assert checks["status"].to_list() == ["ok"] * checks.height
     assert checks.select(pl.col("delta").abs().max()).item() < 1e-6
+    assert tables.production_method_good_flows.height == 6
+    assert tables.rgo_flows.height == 2
 
     masonry_output = tables.production_method_good_flows.filter(
         (pl.col("good_id") == "masonry")
@@ -266,6 +268,11 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "function renderOverviewGraph" in html
     assert 'id="goodsHeaderRow"' in html
     assert "let overviewSort = { key: \"net\", direction: \"desc\", absolute: true }" in html
+    assert "function formatOverviewNumber" in html
+    assert "maximumFractionDigits: 0" in html
+    assert "td.title = exactNumberTitle(row[column.key])" in html
+    assert "font-variant-numeric: tabular-nums" in html
+    assert "td:first-child" in html
     assert "function compareOverviewRows" in html
     assert "function sortedOverviewRows" in html
     assert "function setOverviewSort" in html
