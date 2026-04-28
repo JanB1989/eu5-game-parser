@@ -597,7 +597,9 @@ def _explorer_goods(
             input_counts[input_good] = input_counts.get(input_good, 0) + 1
 
     summary_by_name: dict[str, dict[str, Any]] = {}
+    good_details_by_name: dict[str, dict[str, Any]] = {}
     if goods_data is not None:
+        good_details_by_name = {row["name"]: row for row in goods_data.goods.to_dicts()}
         summary_by_name = {
             row["name"]: row
             for row in build_goods_summary(goods_data.goods, data.production_methods).to_dicts()
@@ -607,9 +609,11 @@ def _explorer_goods(
     for good in sorted(goods_names):
         source = _good_source(goods_sources, good)
         summary = summary_by_name.get(good, {})
+        details = good_details_by_name.get(good, {})
         goods.append(
             {
                 "name": good,
+                "designation": details.get("method"),
                 "price": summary.get("default_market_price"),
                 "food": summary.get("food"),
                 "type": summary.get("category"),
@@ -1280,6 +1284,35 @@ def _explorer_html(
       overflow: auto;
       width: 100%;
     }}
+    .designation-tally {{
+      align-items: center;
+      background: #ffffff;
+      border-bottom: 1px solid #dbe4ef;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+    }}
+    .designation-tally-item {{
+      align-items: center;
+      background: #f8fafc;
+      border: 1px solid #dbe4ef;
+      border-radius: 6px;
+      display: inline-flex;
+      gap: 7px;
+      min-height: 28px;
+      padding: 5px 8px;
+    }}
+    .designation-tally-label {{
+      color: #334155;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .designation-tally-count {{
+      color: #64748b;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }}
     .overview-table {{
       border-collapse: collapse;
       font-size: 13px;
@@ -1298,6 +1331,10 @@ def _explorer_html(
       text-transform: uppercase;
       top: 0;
       z-index: 2;
+    }}
+    .overview-table .designation-column {{
+      min-width: 160px;
+      width: 190px;
     }}
     .overview-table th:first-child {{
       left: 0;
@@ -1520,6 +1557,7 @@ def _explorer_html(
     const buildingsByName = new Map(network.buildings.map(building => [building.name, building]));
     const goodsOverviewColumns = [
       ["name", "name", false],
+      ["designation", "designation", false],
       ["price", "price", true],
       ["food", "food", true],
       ["type", "type", false],
@@ -1758,9 +1796,40 @@ def _explorer_html(
       }}
       renderGoodsOverview();
     }}
+    function designationLabel(good) {{
+      return formatOverviewValue(good.designation);
+    }}
+    function designationTallyRows() {{
+      const counts = new Map();
+      for (const good of network.goods) {{
+        const label = designationLabel(good);
+        counts.set(label, (counts.get(label) || 0) + 1);
+      }}
+      return [...counts.entries()]
+        .map(([label, count]) => ({{ label, count }}))
+        .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+    }}
+    function renderDesignationTally(container) {{
+      const tally = document.createElement("div");
+      tally.className = "designation-tally";
+      for (const row of designationTallyRows()) {{
+        const item = document.createElement("span");
+        item.className = "designation-tally-item";
+        const label = document.createElement("span");
+        label.className = "designation-tally-label";
+        label.textContent = row.label;
+        const count = document.createElement("span");
+        count.className = "designation-tally-count";
+        count.textContent = row.count.toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
+        item.append(label, count);
+        tally.append(item);
+      }}
+      container.append(tally);
+    }}
     function renderGoodsOverview() {{
       const container = document.getElementById("goodsOverview");
       container.replaceChildren();
+      renderDesignationTally(container);
       const table = document.createElement("table");
       table.className = "overview-table";
       const thead = document.createElement("thead");
@@ -1768,6 +1837,7 @@ def _explorer_html(
       for (const [key, label, numeric] of goodsOverviewColumns) {{
         const cell = document.createElement("th");
         cell.className = numeric ? "numeric sortable" : "sortable";
+        if (key === "designation") cell.classList.add("designation-column");
         const button = document.createElement("button");
         button.className = "sort-header";
         button.type = "button";
@@ -1790,6 +1860,7 @@ def _explorer_html(
         for (const [key, , numeric] of goodsOverviewColumns) {{
           const cell = document.createElement("td");
           if (numeric) cell.className = "numeric";
+          if (key === "designation") cell.classList.add("designation-column");
           cell.textContent = key === "pm_output" || key === "pm_input"
             ? formatOverviewCount(good[key])
             : formatOverviewValue(good[key]);
