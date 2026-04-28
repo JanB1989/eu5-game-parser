@@ -285,6 +285,8 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert 'id="flowTab"' in html
     assert 'id="modifierTab"' in html
     assert "function renderGoodsOverview" in html
+    assert "function renderDesignationTally" in html
+    assert "function designationTallyRows" in html
     assert 'id="goodsOverview"' in html
     assert "const goodsOverviewColumns" in html
     assert "let goodsOverviewSort = { key: \"name\", direction: \"asc\" }" in html
@@ -292,6 +294,8 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert "function setGoodsOverviewSort" in html
     assert "sort-header" in html
     assert "sort-indicator" in html
+    assert "designation-column" in html
+    assert "designation-tally" in html
     assert "maximumFractionDigits: 0" in html
     assert "font-variant-numeric: tabular-nums" in html
     assert ".overview-table td:first-child" in html
@@ -372,6 +376,7 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert "function formatPercentValue" in html
     assert 'if (value === null || value === undefined) return "n/a";' in html
     assert "const network =" in html
+    assert '"designation":' in html
     assert '"price":' in html
     assert '"food":' in html
     assert '"type":' in html
@@ -430,6 +435,7 @@ def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -
     assert '"name": "stone_bricks"' in html
     assert '"name": "monument_work"' in html
     cotton = _network_good(network, "cotton")
+    assert cotton["designation"] == "farming"
     assert cotton["price"] == 3.0
     assert cotton["food"] == 8.0
     assert cotton["type"] == "raw_material"
@@ -440,9 +446,14 @@ def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -
     masonry = _network_good(network, "masonry")
     assert masonry["price"] == 8.0
     assert masonry["food"] is None
+    assert masonry["designation"] is None
     assert masonry["type"] == "produced"
     assert masonry["pm_output"] == 4
     assert masonry["pm_input"] == 2
+
+    designation_counts = _designation_counts(network)
+    assert designation_counts["farming"] == 1
+    assert designation_counts["n/a"] == 12
 
 
 def test_goods_flow_explorer_can_preselect_building(tmp_path: Path) -> None:
@@ -613,3 +624,11 @@ def _network_good(network: dict, name: str) -> dict:
         if good["name"] == name:
             return good
     raise AssertionError(f"Missing network good {name}")
+
+
+def _designation_counts(network: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for good in network["goods"]:
+        designation = good["designation"] or "n/a"
+        counts[designation] = counts.get(designation, 0) + 1
+    return counts
