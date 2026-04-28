@@ -264,6 +264,14 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert '"production_method": "stone_bricks"' in html
     assert "function graphElements" in html
     assert "function renderOverviewGraph" in html
+    assert 'id="goodsHeaderRow"' in html
+    assert "let overviewSort = { key: \"net\", direction: \"desc\", absolute: true }" in html
+    assert "function compareOverviewRows" in html
+    assert "function sortedOverviewRows" in html
+    assert "function setOverviewSort" in html
+    assert "function renderTableHeader" in html
+    assert "sort-header" in html
+    assert "sort-indicator" in html
     assert "location_count" in html
     payload = _embedded_payload(html)
     assert "bucketFlows" in payload

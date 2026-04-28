@@ -1299,6 +1299,35 @@ def _explorer_html(
       top: 0;
       z-index: 2;
     }}
+    .overview-table th.sortable {{
+      cursor: pointer;
+      user-select: none;
+    }}
+    .sort-header {{
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: inherit;
+      font-weight: inherit;
+      gap: 4px;
+      justify-content: flex-start;
+      min-height: 0;
+      padding: 0;
+      text-transform: inherit;
+      width: 100%;
+    }}
+    .overview-table th.numeric .sort-header {{
+      justify-content: flex-end;
+    }}
+    .sort-indicator {{
+      color: #2563eb;
+      display: inline-block;
+      min-width: 0.8em;
+    }}
     .overview-table td {{
       border-bottom: 1px solid #e2e8f0;
       padding: 8px 12px;
@@ -1474,6 +1503,16 @@ def _explorer_html(
     const cloneElement = element => JSON.parse(JSON.stringify(element));
     const goodsByName = new Map(network.goods.map(good => [good.name, good]));
     const buildingsByName = new Map(network.buildings.map(building => [building.name, building]));
+    const goodsOverviewColumns = [
+      ["name", "name", false],
+      ["price", "price", true],
+      ["food", "food", true],
+      ["type", "type", false],
+      ["transport_cost", "transport cost", true],
+      ["pm_output", "pm_output", true],
+      ["pm_input", "pm_input", true]
+    ];
+    let goodsOverviewSort = {{ key: "name", direction: "asc" }};
     const provenanceStyles = {{
       vanilla_exact: {{
         label: "Exact vanilla value",
@@ -1658,6 +1697,44 @@ def _explorer_html(
       const numeric = Number(value);
       return Number.isFinite(numeric) ? String(Math.trunc(numeric)) : "0";
     }}
+    function goodsOverviewSortableValue(row, key) {{
+      const value = row[key];
+      if (value === null || value === undefined || value === "") return null;
+      if (typeof value === "number") return value;
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) return numeric;
+      return String(value).toLocaleLowerCase();
+    }}
+    function compareGoodsOverviewRows(left, right) {{
+      const leftValue = goodsOverviewSortableValue(left, goodsOverviewSort.key);
+      const rightValue = goodsOverviewSortableValue(right, goodsOverviewSort.key);
+      if (leftValue === null && rightValue === null) return left.name.localeCompare(right.name);
+      if (leftValue === null) return 1;
+      if (rightValue === null) return -1;
+      let result = 0;
+      if (typeof leftValue === "number" && typeof rightValue === "number") {{
+        result = leftValue - rightValue;
+      }} else {{
+        result = String(leftValue).localeCompare(String(rightValue));
+      }}
+      if (result === 0) return left.name.localeCompare(right.name);
+      return goodsOverviewSort.direction === "asc" ? result : -result;
+    }}
+    function setGoodsOverviewSort(key) {{
+      if (goodsOverviewSort.key === key) {{
+        goodsOverviewSort = {{
+          key,
+          direction: goodsOverviewSort.direction === "asc" ? "desc" : "asc"
+        }};
+      }} else {{
+        const column = goodsOverviewColumns.find(([columnKey]) => columnKey === key);
+        goodsOverviewSort = {{
+          key,
+          direction: column && column[2] ? "desc" : "asc"
+        }};
+      }}
+      renderGoodsOverview();
+    }}
     function renderGoodsOverview() {{
       const container = document.getElementById("goodsOverview");
       container.replaceChildren();
@@ -1665,28 +1742,29 @@ def _explorer_html(
       table.className = "overview-table";
       const thead = document.createElement("thead");
       const headerRow = document.createElement("tr");
-      const columns = [
-        ["name", "name", false],
-        ["price", "price", true],
-        ["food", "food", true],
-        ["type", "type", false],
-        ["transport_cost", "transport cost", true],
-        ["pm_output", "pm_output", true],
-        ["pm_input", "pm_input", true]
-      ];
-      for (const [, label, numeric] of columns) {{
+      for (const [key, label, numeric] of goodsOverviewColumns) {{
         const cell = document.createElement("th");
-        cell.textContent = label;
-        if (numeric) cell.className = "numeric";
+        cell.className = numeric ? "numeric sortable" : "sortable";
+        const button = document.createElement("button");
+        button.className = "sort-header";
+        button.type = "button";
+        button.addEventListener("click", () => setGoodsOverviewSort(key));
+        const labelSpan = document.createElement("span");
+        labelSpan.textContent = label;
+        const indicator = document.createElement("span");
+        indicator.className = "sort-indicator";
+        indicator.textContent = goodsOverviewSort.key === key
+          ? (goodsOverviewSort.direction === "asc" ? "^" : "v")
+          : "";
+        button.append(labelSpan, indicator);
+        cell.append(button);
         headerRow.append(cell);
       }}
       thead.append(headerRow);
       const tbody = document.createElement("tbody");
-      for (const good of [...network.goods].sort((left, right) =>
-        left.name.localeCompare(right.name)
-      )) {{
+      for (const good of [...network.goods].sort(compareGoodsOverviewRows)) {{
         const row = document.createElement("tr");
-        for (const [key, , numeric] of columns) {{
+        for (const [key, , numeric] of goodsOverviewColumns) {{
           const cell = document.createElement("td");
           if (numeric) cell.className = "numeric";
           cell.textContent = key === "pm_output" || key === "pm_input"

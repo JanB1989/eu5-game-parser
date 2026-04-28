@@ -369,6 +369,35 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       top: 0;
       z-index: 1;
     }}
+    th.sortable {{
+      cursor: pointer;
+      user-select: none;
+    }}
+    .sort-header {{
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: inherit;
+      font-weight: inherit;
+      gap: 4px;
+      justify-content: flex-end;
+      min-height: 0;
+      padding: 0;
+      text-transform: inherit;
+      width: 100%;
+    }}
+    th:first-child .sort-header {{
+      justify-content: flex-start;
+    }}
+    .sort-indicator {{
+      color: #1f6feb;
+      display: inline-block;
+      min-width: 0.8em;
+    }}
     tr {{
       cursor: pointer;
     }}
@@ -434,21 +463,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         <div class="table-wrap">
           <table>
             <thead>
-              <tr>
-                <th>Good</th>
-                <th>Supply</th>
-                <th>Demand</th>
-                <th>Net</th>
-                <th>Emp</th>
-                <th>Nobles</th>
-                <th>Clergy</th>
-                <th>Burghers</th>
-                <th>Laborers</th>
-                <th>Soldiers</th>
-                <th>Peasants</th>
-                <th>Slaves</th>
-                <th>Tribesmen</th>
-              </tr>
+              <tr id="goodsHeaderRow"></tr>
             </thead>
             <tbody id="goodsBody"></tbody>
           </table>
@@ -475,6 +490,19 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       {{ key: "employed_slaves", label: "slaves" }},
       {{ key: "employed_tribesmen", label: "tribesmen" }}
     ];
+    const overviewColumns = [
+      {{ key: "good_id", label: "Good", numeric: false }},
+      {{ key: "supply", label: "Supply", numeric: true }},
+      {{ key: "demand", label: "Demand", numeric: true }},
+      {{ key: "net", label: "Net", numeric: true }},
+      {{ key: "employed_total", label: "Emp", numeric: true }},
+      ...popColumns.map(column => ({{
+        key: column.key,
+        label: column.label[0].toUpperCase() + column.label.slice(1),
+        numeric: true
+      }}))
+    ];
+    let overviewSort = {{ key: "net", direction: "desc", absolute: true }};
     let currentView = "overview";
     let selectedGood = goods[0]?.good_id || "";
     let selectedMarketId = null;
@@ -576,6 +604,73 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         .filter(column => Math.abs(Number(row[column.key] || 0)) > 0.000001)
         .map(column => `${{column.label}}: ${{formatNumber(row[column.key])}}`);
     }}
+    function sortableValue(row, key, absolute = false) {{
+      const value = row[key];
+      if (value === null || value === undefined || value === "") return null;
+      if (typeof value === "number") return absolute ? Math.abs(value) : value;
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) return absolute ? Math.abs(numeric) : numeric;
+      return String(value).toLocaleLowerCase();
+    }}
+    function compareOverviewRows(left, right) {{
+      const leftValue = sortableValue(left, overviewSort.key, overviewSort.absolute);
+      const rightValue = sortableValue(right, overviewSort.key, overviewSort.absolute);
+      if (leftValue === null && rightValue === null) {{
+        return left.good_id.localeCompare(right.good_id);
+      }}
+      if (leftValue === null) return 1;
+      if (rightValue === null) return -1;
+      let result = 0;
+      if (typeof leftValue === "number" && typeof rightValue === "number") {{
+        result = leftValue - rightValue;
+      }} else {{
+        result = String(leftValue).localeCompare(String(rightValue));
+      }}
+      if (result === 0) return left.good_id.localeCompare(right.good_id);
+      return overviewSort.direction === "asc" ? result : -result;
+    }}
+    function sortedOverviewRows() {{
+      return rowsForScope().slice().sort(compareOverviewRows);
+    }}
+    function setOverviewSort(key) {{
+      if (overviewSort.key === key) {{
+        overviewSort = {{
+          key,
+          direction: overviewSort.direction === "asc" ? "desc" : "asc",
+          absolute: false
+        }};
+      }} else {{
+        const column = overviewColumns.find(item => item.key === key);
+        overviewSort = {{
+          key,
+          direction: column && column.numeric ? "desc" : "asc",
+          absolute: false
+        }};
+      }}
+      render();
+    }}
+    function renderTableHeader() {{
+      const header = document.getElementById("goodsHeaderRow");
+      header.replaceChildren();
+      for (const column of overviewColumns) {{
+        const th = document.createElement("th");
+        th.className = column.numeric ? "numeric sortable" : "sortable";
+        const button = document.createElement("button");
+        button.className = "sort-header";
+        button.type = "button";
+        button.addEventListener("click", () => setOverviewSort(column.key));
+        const label = document.createElement("span");
+        label.textContent = column.label;
+        const indicator = document.createElement("span");
+        indicator.className = "sort-indicator";
+        indicator.textContent = overviewSort.key === column.key
+          ? (overviewSort.direction === "asc" ? "^" : "v")
+          : "";
+        button.append(label, indicator);
+        th.append(button);
+        header.append(th);
+      }}
+    }}
     function marketLabel(market) {{
       if (!market) return "Global";
       return `${{market.market_center_slug || "Market"}} (#${{market.market_id}})`;
@@ -620,11 +715,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       }}
     }}
     function renderTable() {{
+      renderTableHeader();
       const body = document.getElementById("goodsBody");
       body.replaceChildren();
-      const rows = rowsForScope()
-        .slice()
-        .sort((left, right) => Math.abs(right.net || 0) - Math.abs(left.net || 0));
+      const rows = sortedOverviewRows();
       for (const row of rows) {{
         const tr = document.createElement("tr");
         if (row.good_id === selectedGood) tr.className = "selected";
@@ -633,16 +727,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           document.getElementById("goodSearch").value = selectedGood;
           render();
         }});
-        for (const value of [
-          row.good_id,
-          formatNumber(row.supply),
-          formatNumber(row.demand),
-          formatNumber(row.net),
-          formatNumber(row.employed_total),
-          ...popColumns.map(column => formatNumber(row[column.key]))
-        ]) {{
+        for (const column of overviewColumns) {{
           const td = document.createElement("td");
-          td.textContent = value;
+          if (column.numeric) td.className = "numeric";
+          td.textContent = column.numeric ? formatNumber(row[column.key]) : row[column.key];
           tr.append(td);
         }}
         body.append(tr);
@@ -890,10 +978,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       }}).run();
     }}
     function renderOverviewGraph() {{
-      const rows = rowsForScope()
-        .slice()
-        .sort((left, right) => Math.abs(right.net || 0) - Math.abs(left.net || 0))
-        .slice(0, 35);
+      const rows = sortedOverviewRows().slice(0, 35);
       const elements = rows.map(row => ({{
         data: {{
           id: `overview:${{row.good_id}}`,

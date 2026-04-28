@@ -286,6 +286,12 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert 'id="modifierTab"' in html
     assert "function renderGoodsOverview" in html
     assert 'id="goodsOverview"' in html
+    assert "const goodsOverviewColumns" in html
+    assert "let goodsOverviewSort = { key: \"name\", direction: \"asc\" }" in html
+    assert "function compareGoodsOverviewRows" in html
+    assert "function setGoodsOverviewSort" in html
+    assert "sort-header" in html
+    assert "sort-indicator" in html
     assert "transport cost" in html
     assert "Output Modifiers" in html
     assert 'id="modifierGoodSelect"' in html
