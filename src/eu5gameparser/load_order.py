@@ -66,14 +66,15 @@ class LoadOrderConfig:
     def load(cls, path: str | Path = DEFAULT_LOAD_ORDER_PATH) -> LoadOrderConfig:
         config_path = _resolve_load_order_path(Path(path))
         data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        vanilla_root = Path(data.get("paths", {}).get("vanilla_root", DEFAULT_GAME_ROOT))
+        base_dir = config_path.resolve().parent
+        vanilla_root = _config_path(base_dir, data.get("paths", {}).get("vanilla_root", DEFAULT_GAME_ROOT))
         mods: dict[str, GameLayer] = {}
         for mod in data.get("mods", []):
             mod_id = str(mod["id"])
             mods[mod_id] = GameLayer(
                 id=mod_id,
                 name=str(mod.get("name") or mod_id),
-                root=Path(mod["root"]),
+                root=_config_path(base_dir, mod["root"]),
                 kind="mod",
             )
         profiles = {
@@ -154,6 +155,13 @@ def _resolve_load_order_path(path: Path) -> Path:
     if candidate.exists():
         return candidate
     return path
+
+
+def _config_path(base_dir: Path, raw: str | Path) -> Path:
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return base_dir / path
 
 
 def load_merged_directory(profile: DataProfile, relative_dir: str | Path) -> MergedDirectory:

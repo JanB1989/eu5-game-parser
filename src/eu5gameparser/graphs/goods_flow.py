@@ -17,7 +17,7 @@ from eu5gameparser.domain.availability import (
     filter_eu5_data_by_age,
 )
 from eu5gameparser.domain.buildings import BuildingData, load_building_data
-from eu5gameparser.domain.goods import GoodsData, load_goods_data
+from eu5gameparser.domain.goods import GoodsData, build_goods_summary, load_goods_data
 from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH
 
 NODE_X_SPACING = 320
@@ -497,32 +497,8 @@ def _explorer_network(
     goods_data: GoodsData | None,
     advancements: Any | None = None,
 ) -> dict[str, Any]:
-    goods_sources = _good_sources_from_data(goods_data)
-    goods_names = set(goods_sources)
     methods = _methods_from_data(data)
-    for method in methods:
-        if method.produced:
-            goods_names.add(method.produced)
-        goods_names.update(method.input_goods)
-
-    goods = []
-    for good in sorted(goods_names):
-        source = _good_source(goods_sources, good)
-        goods.append(
-            {
-                "name": good,
-                "source_layer": source["source_layer"],
-                "source_mod": source["source_mod"],
-                "source_mode": source["source_mode"],
-                "source_history": source["source_history"],
-                "provenance_state": _provenance_state(
-                    source["source_layer"],
-                    source["source_mod"],
-                    source["source_mode"],
-                    source["source_history"],
-                ),
-            }
-        )
+    goods = _explorer_goods(goods_data, data, methods)
 
     buildings = []
     for row in data.buildings.to_dicts():
@@ -601,6 +577,58 @@ def _explorer_network(
             for method in methods
         ],
     }
+
+
+def _explorer_goods(
+    goods_data: GoodsData | None,
+    data: BuildingData,
+    methods: list[_Method],
+) -> list[dict[str, Any]]:
+    goods_sources = _good_sources_from_data(goods_data)
+    goods_names = set(goods_sources)
+    output_counts: dict[str, int] = {}
+    input_counts: dict[str, int] = {}
+    for method in methods:
+        if method.produced:
+            goods_names.add(method.produced)
+            output_counts[method.produced] = output_counts.get(method.produced, 0) + 1
+        for input_good in method.input_goods:
+            goods_names.add(input_good)
+            input_counts[input_good] = input_counts.get(input_good, 0) + 1
+
+    summary_by_name: dict[str, dict[str, Any]] = {}
+    if goods_data is not None:
+        summary_by_name = {
+            row["name"]: row
+            for row in build_goods_summary(goods_data.goods, data.production_methods).to_dicts()
+        }
+
+    goods = []
+    for good in sorted(goods_names):
+        source = _good_source(goods_sources, good)
+        summary = summary_by_name.get(good, {})
+        goods.append(
+            {
+                "name": good,
+                "price": summary.get("default_market_price"),
+                "food": summary.get("food"),
+                "type": summary.get("category"),
+                "transport_cost": summary.get("transport_cost"),
+                "pm_output": summary.get("output_method_count", output_counts.get(good, 0)),
+                "pm_input": summary.get("input_method_count", input_counts.get(good, 0)),
+                "source_layer": source["source_layer"],
+                "source_mod": source["source_mod"],
+                "source_mode": source["source_mode"],
+                "source_history": source["source_history"],
+                "provenance_state": _provenance_state(
+                    source["source_layer"],
+                    source["source_mod"],
+                    source["source_mode"],
+                    source["source_history"],
+                ),
+            }
+        )
+    return goods
 
 
 def _advancement_output_modifiers(advancements: Any | None) -> list[dict[str, Any]]:
@@ -1245,6 +1273,43 @@ def _explorer_html(
       height: 100%;
       width: 100%;
     }}
+    #goodsOverview {{
+      background: #ffffff;
+      display: none;
+      height: 100%;
+      overflow: auto;
+      width: 100%;
+    }}
+    .overview-table {{
+      border-collapse: collapse;
+      font-size: 13px;
+      min-width: 760px;
+      width: 100%;
+    }}
+    .overview-table th {{
+      background: #f8fafc;
+      border-bottom: 1px solid #cbd5e1;
+      color: #475569;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 9px 12px;
+      position: sticky;
+      text-align: left;
+      text-transform: uppercase;
+      top: 0;
+      z-index: 2;
+    }}
+    .overview-table td {{
+      border-bottom: 1px solid #e2e8f0;
+      padding: 8px 12px;
+      white-space: nowrap;
+    }}
+    .overview-table .numeric {{
+      text-align: right;
+    }}
+    .overview-table tbody tr:hover {{
+      background: #f8fafc;
+    }}
     .legend {{
       background: rgba(255, 255, 255, 0.96);
       border: 1px solid #cbd5e1;
@@ -1313,6 +1378,7 @@ def _explorer_html(
       <h1>Goods Flow</h1>
       <div class="meta" id="graphMeta">0 nodes &middot; 0 edges</div>
       <div class="tabs" aria-label="Explorer view">
+        <button class="tab-button" id="overviewTab" type="button">Overview</button>
         <button class="tab-button active" id="flowTab" type="button">Flow</button>
         <button class="tab-button" id="modifierTab" type="button">Output Modifiers</button>
       </div>
@@ -1357,18 +1423,34 @@ def _explorer_html(
         <select class="flow-control" id="ageFilter" aria-label="Maximum age">
 {age_options}
         </select>
-        <label class="toggle" title="Include country, region, and religion-specific unlocks">
+        <label
+          class="toggle shared-graph-control"
+          title="Include country, region, and religion-specific unlocks"
+        >
           <input id="specificUnlocks" type="checkbox">
           Specific unlocks
         </label>
         <button class="flow-control" type="button" onclick="runSpreadLayout()">Spread</button>
         <button class="flow-control" type="button" onclick="runRankedLayout()">Ranked</button>
-        <button type="button" onclick="cy.fit(undefined, 80)">Fit</button>
-        <button type="button" onclick="cy.zoom(cy.zoom() * 1.2)">Zoom In</button>
-        <button type="button" onclick="cy.zoom(cy.zoom() / 1.2)">Zoom Out</button>
+        <button
+          class="shared-graph-control"
+          type="button"
+          onclick="cy.fit(undefined, 80)"
+        >Fit</button>
+        <button
+          class="shared-graph-control"
+          type="button"
+          onclick="cy.zoom(cy.zoom() * 1.2)"
+        >Zoom In</button>
+        <button
+          class="shared-graph-control"
+          type="button"
+          onclick="cy.zoom(cy.zoom() / 1.2)"
+        >Zoom Out</button>
       </div>
     </header>
     <div id="cy"></div>
+    <div id="goodsOverview"></div>
     <details class="legend" open>
       <summary>Legend</summary>
       <div class="legend-body">
@@ -1562,6 +1644,61 @@ def _explorer_html(
     function formatPercentValue(value) {{
       const formatted = formatMetricValue(value, true);
       return formatted === "n/a" ? formatted : `${{formatted}}%`;
+    }}
+    function formatOverviewValue(value) {{
+      if (value === null || value === undefined || value === "") return "n/a";
+      if (typeof value === "number") {{
+        return Number.isFinite(value)
+          ? value.toLocaleString(undefined, {{ maximumFractionDigits: 2 }})
+          : "n/a";
+      }}
+      return String(value);
+    }}
+    function formatOverviewCount(value) {{
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? String(Math.trunc(numeric)) : "0";
+    }}
+    function renderGoodsOverview() {{
+      const container = document.getElementById("goodsOverview");
+      container.replaceChildren();
+      const table = document.createElement("table");
+      table.className = "overview-table";
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
+      const columns = [
+        ["name", "name", false],
+        ["price", "price", true],
+        ["food", "food", true],
+        ["type", "type", false],
+        ["transport_cost", "transport cost", true],
+        ["pm_output", "pm_output", true],
+        ["pm_input", "pm_input", true]
+      ];
+      for (const [, label, numeric] of columns) {{
+        const cell = document.createElement("th");
+        cell.textContent = label;
+        if (numeric) cell.className = "numeric";
+        headerRow.append(cell);
+      }}
+      thead.append(headerRow);
+      const tbody = document.createElement("tbody");
+      for (const good of [...network.goods].sort((left, right) =>
+        left.name.localeCompare(right.name)
+      )) {{
+        const row = document.createElement("tr");
+        for (const [key, , numeric] of columns) {{
+          const cell = document.createElement("td");
+          if (numeric) cell.className = "numeric";
+          cell.textContent = key === "pm_output" || key === "pm_input"
+            ? formatOverviewCount(good[key])
+            : formatOverviewValue(good[key]);
+          row.append(cell);
+        }}
+        tbody.append(row);
+      }}
+      table.append(thead, tbody);
+      container.append(table);
+      document.getElementById("graphMeta").textContent = `${{network.goods.length}} goods`;
     }}
     function methodMetricLines(method) {{
       return [
@@ -2214,6 +2351,13 @@ def _explorer_html(
       return goodsByName.has(value) ? value : defaultModifierGood();
     }}
     function applyExplorerGraph() {{
+      if (currentExplorerView === "overview") {{
+        cy.elements().remove();
+        clearFocus();
+        renderGoodsOverview();
+        buildLegend([]);
+        return;
+      }}
       const includeSpecific = document.getElementById("specificUnlocks").checked;
       let elements;
       if (currentExplorerView === "modifiers") {{
@@ -2245,6 +2389,7 @@ def _explorer_html(
       runCurrentLayout();
     }}
     function runCurrentLayout() {{
+      if (currentExplorerView === "overview") return;
       if (currentExplorerView === "modifiers") runModifierTimelineLayout();
       else if (currentLayout === "ranked") runRankedLayout();
       else runSpreadLayout();
@@ -2274,14 +2419,25 @@ def _explorer_html(
       }}).run();
     }}
     function updateExplorerControls() {{
+      const overviewActive = currentExplorerView === "overview";
       const flowActive = currentExplorerView === "flow";
+      document.getElementById("overviewTab").classList.toggle("active", overviewActive);
       document.getElementById("flowTab").classList.toggle("active", flowActive);
-      document.getElementById("modifierTab").classList.toggle("active", !flowActive);
+      document.getElementById("modifierTab").classList.toggle(
+        "active",
+        currentExplorerView === "modifiers"
+      );
+      document.getElementById("cy").style.display = overviewActive ? "none" : "";
+      document.getElementById("goodsOverview").style.display = overviewActive ? "block" : "none";
+      document.querySelector(".legend").style.display = overviewActive ? "none" : "";
       for (const element of document.querySelectorAll(".flow-control")) {{
         element.style.display = flowActive ? "" : "none";
       }}
       for (const element of document.querySelectorAll(".modifier-control")) {{
-        element.style.display = flowActive ? "none" : "";
+        element.style.display = currentExplorerView === "modifiers" ? "" : "none";
+      }}
+      for (const element of document.querySelectorAll(".shared-graph-control")) {{
+        element.style.display = overviewActive ? "none" : "";
       }}
     }}
     function setExplorerView(view) {{
@@ -2324,6 +2480,10 @@ def _explorer_html(
         document.getElementById("entitySelect").value = firstItem ? firstItem.name : "";
         applyExplorerGraph();
       }});
+      document.getElementById("overviewTab").addEventListener(
+        "click",
+        () => setExplorerView("overview")
+      );
       document.getElementById("flowTab").addEventListener("click", () => setExplorerView("flow"));
       document.getElementById("modifierTab").addEventListener(
         "click",

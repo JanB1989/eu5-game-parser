@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from eu5gameparser.config import ParserConfig
 from eu5gameparser.domain.buildings import load_building_data
 from eu5gameparser.domain.eu5 import load_eu5_data
+from eu5gameparser.domain.goods import load_goods_data
 from eu5gameparser.graphs import (
     build_good_flow_graph,
     show_good_flow,
@@ -279,8 +281,12 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert 'id="entityOptions"' in html
     assert '<option value="good">Goods</option>' in html
     assert '<option value="building">Buildings</option>' in html
+    assert 'id="overviewTab"' in html
     assert 'id="flowTab"' in html
     assert 'id="modifierTab"' in html
+    assert "function renderGoodsOverview" in html
+    assert 'id="goodsOverview"' in html
+    assert "transport cost" in html
     assert "Output Modifiers" in html
     assert 'id="modifierGoodSelect"' in html
     assert 'id="modifierGoodOptions"' in html
@@ -356,6 +362,12 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert "function formatPercentValue" in html
     assert 'if (value === null || value === undefined) return "n/a";' in html
     assert "const network =" in html
+    assert '"price":' in html
+    assert '"food":' in html
+    assert '"type":' in html
+    assert '"transport_cost":' in html
+    assert '"pm_output":' in html
+    assert '"pm_input":' in html
     assert '"output_modifiers":' in html
     assert '"modifier_key": "global_wheat_output_modifier"' in html
     assert '"modifier_key": "global_rice_output_modifier"' in html
@@ -389,9 +401,15 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
 
 def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -> None:
     data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+    goods_data = load_goods_data(ParserConfig(game_root=FIXTURE_ROOT))
 
-    path = write_goods_flow_explorer_html(tmp_path / "explorer.html", data=data)
+    path = write_goods_flow_explorer_html(
+        tmp_path / "explorer.html",
+        data=data,
+        goods_data=goods_data,
+    )
     html = path.read_text(encoding="utf-8")
+    network = _embedded_network(html)
 
     assert '"goods"' in html
     assert '"buildings"' in html
@@ -401,6 +419,20 @@ def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -
     assert '"name": "mason"' in html
     assert '"name": "stone_bricks"' in html
     assert '"name": "monument_work"' in html
+    cotton = _network_good(network, "cotton")
+    assert cotton["price"] == 3.0
+    assert cotton["food"] == 8.0
+    assert cotton["type"] == "raw_material"
+    assert cotton["transport_cost"] == 1.0
+    assert cotton["pm_output"] == 1
+    assert cotton["pm_input"] == 0
+
+    masonry = _network_good(network, "masonry")
+    assert masonry["price"] == 8.0
+    assert masonry["food"] is None
+    assert masonry["type"] == "produced"
+    assert masonry["pm_output"] == 4
+    assert masonry["pm_input"] == 2
 
 
 def test_goods_flow_explorer_can_preselect_building(tmp_path: Path) -> None:
@@ -557,3 +589,17 @@ def _node(graph: dict, node_id: str) -> dict:
         if node["data"]["id"] == node_id:
             return node
     raise AssertionError(f"Missing node {node_id}")
+
+
+def _embedded_network(html: str) -> dict:
+    marker = "    const network = "
+    start = html.index(marker) + len(marker)
+    end = html.index(";\n    const ageOrder", start)
+    return json.loads(html[start:end])
+
+
+def _network_good(network: dict, name: str) -> dict:
+    for good in network["goods"]:
+        if good["name"] == name:
+            return good
+    raise AssertionError(f"Missing network good {name}")

@@ -42,6 +42,31 @@ def test_profile_resolves_vanilla_mod_and_merged_layers(tmp_path: Path) -> None:
     ]
 
 
+def test_relative_roots_resolve_from_load_order_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    path = config_dir / "load_order.toml"
+    path.write_text(
+        """
+[paths]
+vanilla_root = "game"
+
+[[mods]]
+id = "test_mod"
+root = "mods/Test"
+
+[profiles]
+merged_default = ["vanilla", "test_mod"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = LoadOrderConfig.load(path)
+
+    assert config.vanilla_root == config_dir / "game"
+    assert config.mods["test_mod"].root == config_dir / "mods" / "Test"
+
+
 def test_mod_file_override_and_database_entry_modes(tmp_path: Path) -> None:
     load_order = _load_order_file(tmp_path)
     data = load_building_data(profile="merged_default", load_order_path=load_order)
