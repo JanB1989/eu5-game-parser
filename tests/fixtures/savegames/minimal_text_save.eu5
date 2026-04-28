@@ -32,6 +32,10 @@ locations={
                 pop_stats={
                     laborers={
                         employed_in_rgo=1
+                        unemployed=3
+                    }
+                    peasants={
+                        unemployed=5
                     }
                 }
             }
@@ -50,6 +54,10 @@ locations={
                 pop_stats={
                     laborers={
                         employed_in_rgo=1
+                        unemployed=2
+                    }
+                    burghers={
+                        unemployed=4
                     }
                 }
             }

@@ -29,6 +29,7 @@ POP_TYPES = (
     "tribesmen",
 )
 POP_EMPLOYED_COLUMNS = tuple(f"employed_{pop_type}" for pop_type in POP_TYPES)
+POP_UNEMPLOYED_COLUMNS = tuple(f"unemployed_{pop_type}" for pop_type in POP_TYPES)
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class SavegameTables:
     rgo_flows: pl.DataFrame
     production_method_good_flows: pl.DataFrame
     production_method_population_flows: pl.DataFrame
+    market_population_pools: pl.DataFrame
     accounting_checks: pl.DataFrame
 
     def as_dict(self) -> dict[str, pl.DataFrame]:
@@ -57,6 +59,7 @@ class SavegameTables:
             "rgo_flows": self.rgo_flows,
             "production_method_good_flows": self.production_method_good_flows,
             "production_method_population_flows": self.production_method_population_flows,
+            "market_population_pools": self.market_population_pools,
             "accounting_checks": self.accounting_checks,
         }
 
@@ -305,6 +308,11 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         building_methods,
         market_goods,
     )
+    market_population_pools = _market_population_pool_table(
+        markets,
+        locations,
+        population_flows,
+    )
     flows, rgo_flows, checks = _flow_tables(
         eu5_data.building_data,
         locations,
@@ -324,6 +332,7 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         rgo_flows=rgo_flows,
         production_method_good_flows=flows,
         production_method_population_flows=population_flows,
+        market_population_pools=market_population_pools,
         accounting_checks=checks,
     )
 
@@ -364,6 +373,7 @@ def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.
             if location_id is None:
                 continue
             rgo_employed_by_pop = _rgo_employed_by_pop(data)
+            unemployed_by_pop = _unemployed_by_pop(data)
             rows.append(
                 {
                     "location_id": location_id,
@@ -381,7 +391,9 @@ def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.
                         _first(data, "max_raw_material_workers")
                     ),
                     "rgo_employed": sum(rgo_employed_by_pop.values()),
+                    "unemployed_total": sum(unemployed_by_pop.values()),
                     **_pop_columns(rgo_employed_by_pop),
+                    **_unemployed_pop_columns(unemployed_by_pop),
                 }
             )
     return pl.DataFrame(rows, schema=_locations_schema())
@@ -906,6 +918,114 @@ def _rgo_population_flow_rows(locations: pl.DataFrame) -> list[dict[str, Any]]:
     return rows
 
 
+def _market_population_pool_table(
+    markets: pl.DataFrame,
+    locations: pl.DataFrame,
+    population_flows: pl.DataFrame,
+) -> pl.DataFrame:
+    market_labels = _market_center_slug_by_id(markets)
+    all_market_ids = set(market_labels)
+    employed_by_market = _population_pool_by_market(
+        population_flows,
+        ["employed_total", *POP_EMPLOYED_COLUMNS],
+    )
+    unemployed_by_market = _population_pool_by_market(
+        locations,
+        ["unemployed_total", *POP_UNEMPLOYED_COLUMNS],
+    )
+    all_market_ids.update(employed_by_market)
+    all_market_ids.update(unemployed_by_market)
+
+    rows = [
+        _population_pool_row(
+            market_id,
+            market_labels.get(market_id),
+            employed_by_market.get(market_id, {}),
+            unemployed_by_market.get(market_id, {}),
+        )
+        for market_id in sorted(market_id for market_id in all_market_ids if market_id is not None)
+    ]
+    rows.insert(0, _global_population_pool_row(rows))
+    return pl.DataFrame(rows, schema=_market_population_pool_schema())
+
+
+def _market_center_slug_by_id(markets: pl.DataFrame) -> dict[int, str | None]:
+    if markets.is_empty():
+        return {}
+    return {
+        row["market_id"]: row.get("market_center_slug")
+        for row in markets.select(["market_id", "market_center_slug"]).to_dicts()
+        if row["market_id"] is not None
+    }
+
+
+def _population_pool_by_market(
+    table: pl.DataFrame,
+    columns: list[str],
+) -> dict[int, dict[str, float]]:
+    if table.is_empty() or "market_id" not in table.columns:
+        return {}
+    selected = ["market_id", *[column for column in columns if column in table.columns]]
+    if len(selected) == 1:
+        return {}
+    grouped = (
+        table.select(selected)
+        .filter(pl.col("market_id").is_not_null())
+        .group_by("market_id")
+        .agg(
+            [
+                pl.col(column).fill_null(0).sum().alias(column)
+                for column in selected
+                if column != "market_id"
+            ]
+        )
+    )
+    return {
+        row["market_id"]: {
+            column: float(row.get(column) or 0.0)
+            for column in columns
+            if column in grouped.columns
+        }
+        for row in grouped.to_dicts()
+    }
+
+
+def _population_pool_row(
+    market_id: int | None,
+    market_center_slug: str | None,
+    employed: dict[str, float],
+    unemployed: dict[str, float],
+) -> dict[str, Any]:
+    return {
+        "market_id": market_id,
+        "market_center_slug": market_center_slug,
+        "employed_total": float(employed.get("employed_total", 0.0)),
+        **{
+            column: float(employed.get(column, 0.0))
+            for column in POP_EMPLOYED_COLUMNS
+        },
+        "unemployed_total": float(unemployed.get("unemployed_total", 0.0)),
+        **{
+            column: float(unemployed.get(column, 0.0))
+            for column in POP_UNEMPLOYED_COLUMNS
+        },
+    }
+
+
+def _global_population_pool_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    columns = [
+        "employed_total",
+        *POP_EMPLOYED_COLUMNS,
+        "unemployed_total",
+        *POP_UNEMPLOYED_COLUMNS,
+    ]
+    return {
+        "market_id": None,
+        "market_center_slug": "Global",
+        **{column: sum(row.get(column, 0.0) or 0.0 for row in rows) for column in columns},
+    }
+
+
 def _accounting_check_rows(
     market_goods: pl.DataFrame,
     bucket_flows: pl.DataFrame,
@@ -1035,6 +1155,14 @@ def _building_basis(building: dict[str, Any]) -> float:
 
 
 def _rgo_employed_by_pop(location: CList) -> dict[str, float]:
+    return _pop_stat_by_pop(location, "employed_in_rgo")
+
+
+def _unemployed_by_pop(location: CList) -> dict[str, float]:
+    return _pop_stat_by_pop(location, "unemployed")
+
+
+def _pop_stat_by_pop(location: CList, field: str) -> dict[str, float]:
     population = _as_block(_first(location, "population"))
     pop_stats = _as_block(_first(population, "pop_stats")) if population is not None else None
     if pop_stats is None:
@@ -1043,12 +1171,19 @@ def _rgo_employed_by_pop(location: CList) -> dict[str, float]:
     for entry in pop_stats.entries:
         stats = _as_block(entry.value)
         if stats is not None:
-            amounts[entry.key] = _to_float(_first(stats, "employed_in_rgo")) or 0.0
+            amounts[entry.key] = _to_float(_first(stats, field)) or 0.0
     return amounts
 
 
 def _pop_columns(amounts: dict[str, float]) -> dict[str, float]:
     return {f"employed_{pop_type}": float(amounts.get(pop_type, 0.0)) for pop_type in POP_TYPES}
+
+
+def _unemployed_pop_columns(amounts: dict[str, float]) -> dict[str, float]:
+    return {
+        f"unemployed_{pop_type}": float(amounts.get(pop_type, 0.0))
+        for pop_type in POP_TYPES
+    }
 
 
 def _single_pop_columns(pop_type: str | None, amount: float) -> dict[str, float]:
@@ -1291,8 +1426,10 @@ def _locations_schema() -> dict[str, Any]:
         "raw_material": pl.String,
         "max_raw_material_workers": pl.Float64,
         "rgo_employed": pl.Float64,
+        "unemployed_total": pl.Float64,
     }
     schema.update({column: pl.Float64 for column in POP_EMPLOYED_COLUMNS})
+    schema.update({column: pl.Float64 for column in POP_UNEMPLOYED_COLUMNS})
     return schema
 
 
@@ -1394,6 +1531,18 @@ def _population_flow_schema() -> dict[str, Any]:
         "employed_total": pl.Float64,
     }
     schema.update({column: pl.Float64 for column in POP_EMPLOYED_COLUMNS})
+    return schema
+
+
+def _market_population_pool_schema() -> dict[str, Any]:
+    schema = {
+        "market_id": pl.Int64,
+        "market_center_slug": pl.String,
+        "employed_total": pl.Float64,
+    }
+    schema.update({column: pl.Float64 for column in POP_EMPLOYED_COLUMNS})
+    schema["unemployed_total"] = pl.Float64
+    schema.update({column: pl.Float64 for column in POP_UNEMPLOYED_COLUMNS})
     return schema
 
 

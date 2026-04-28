@@ -7,7 +7,11 @@ from typing import Any
 
 import polars as pl
 
-from eu5gameparser.savegame.exporter import POP_EMPLOYED_COLUMNS, SavegameTables
+from eu5gameparser.savegame.exporter import (
+    POP_EMPLOYED_COLUMNS,
+    POP_UNEMPLOYED_COLUMNS,
+    SavegameTables,
+)
 
 
 def write_savegame_explorer_html(tables: SavegameTables, path: str | Path) -> Path:
@@ -31,6 +35,7 @@ def _payload(tables: SavegameTables) -> dict[str, Any]:
         "bucketFlows": _bucket_flow_rows(tables.market_good_bucket_flows),
         "flows": _flow_rows(flows, population_flows),
         "rgoFlows": _rgo_flow_rows(tables.rgo_flows, population_flows),
+        "populationPools": _population_pool_rows(tables.market_population_pools),
     }
 
 
@@ -182,6 +187,21 @@ def _rgo_flow_rows(rgo_flows: pl.DataFrame, population_flows: pl.DataFrame) -> l
         )
         for row in rows
     ]
+
+
+def _population_pool_rows(population_pools: pl.DataFrame) -> list[dict[str, Any]]:
+    if population_pools.is_empty():
+        return []
+    columns = [
+        "market_id",
+        "market_center_slug",
+        "employed_total",
+        *POP_EMPLOYED_COLUMNS,
+        "unemployed_total",
+        *POP_UNEMPLOYED_COLUMNS,
+    ]
+    selected = [column for column in columns if column in population_pools.columns]
+    return population_pools.select(selected).sort("market_id", nulls_last=False).to_dicts()
 
 
 def _population_by_key(
@@ -343,6 +363,24 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       font-weight: 700;
       margin-top: 3px;
     }}
+    .labour-pool {{
+      background: #f8fafc;
+      border: 1px solid #dce5ef;
+      border-radius: 6px;
+      display: grid;
+      gap: 8px;
+      padding: 8px;
+    }}
+    .pool-totals {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .pool-breakdown {{
+      color: #5b677a;
+      font-size: 12px;
+      line-height: 1.35;
+    }}
     .table-wrap {{
       min-height: 0;
       overflow: auto;
@@ -410,6 +448,18 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     th:first-child .sort-header {{
       justify-content: flex-start;
     }}
+    tfoot th, tfoot td {{
+      background: #f8fafc;
+      border-top: 1px solid #cbd5e1;
+      bottom: 0;
+      font-weight: 700;
+      position: sticky;
+      z-index: 1;
+    }}
+    tfoot th:first-child {{
+      left: 0;
+      z-index: 3;
+    }}
     .sort-indicator {{
       color: #1f6feb;
       display: inline-block;
@@ -476,6 +526,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
             </div>
           </div>
           <div class="meta" id="scopeLabel"></div>
+          <div class="labour-pool" id="labourPool"></div>
         </div>
         <div class="table-wrap">
           <table>
@@ -483,6 +534,9 @@ def _standalone_html(payload: dict[str, Any]) -> str:
               <tr id="goodsHeaderRow"></tr>
             </thead>
             <tbody id="goodsBody"></tbody>
+            <tfoot>
+              <tr id="goodsFooterRow"></tr>
+            </tfoot>
           </table>
         </div>
       </aside>
@@ -497,6 +551,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     const bucketFlows = payload.bucketFlows || [];
     const flows = payload.flows || [];
     const rgoFlows = payload.rgoFlows || [];
+    const populationPools = payload.populationPools || [];
     const popColumns = [
       {{ key: "employed_nobles", label: "nobles" }},
       {{ key: "employed_clergy", label: "clergy" }},
@@ -611,10 +666,28 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       element.textContent = formatOverviewNumber(value);
       element.title = exactNumberTitle(value);
     }}
+    function setNumericCell(element, value) {{
+      element.textContent = formatOverviewNumber(value);
+      element.title = exactNumberTitle(value);
+    }}
     function emptyPopulationFields() {{
       const fields = {{ employed_total: 0 }};
       for (const column of popColumns) fields[column.key] = 0;
       return fields;
+    }}
+    function emptyPopulationPool() {{
+      const pool = {{ employed_total: 0, unemployed_total: 0 }};
+      for (const column of popColumns) {{
+        pool[column.key] = 0;
+        pool[column.key.replace("employed_", "unemployed_")] = 0;
+      }}
+      return pool;
+    }}
+    function selectedPopulationPool() {{
+      const pool = selectedMarketId === null
+        ? populationPools.find(row => row.market_id === null)
+        : populationPools.find(row => row.market_id === selectedMarketId);
+      return pool || emptyPopulationPool();
     }}
     function populationFields(row) {{
       const fields = {{ employed_total: Number(row.employed_total || 0) }};
@@ -631,6 +704,15 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       return popColumns
         .filter(column => Math.abs(Number(row[column.key] || 0)) > 0.000001)
         .map(column => `${{column.label}}: ${{formatNumber(row[column.key])}}`);
+    }}
+    function unemployedDetailLines(pool) {{
+      return popColumns
+        .map(column => ({{
+          label: column.label,
+          value: Number(pool[column.key.replace("employed_", "unemployed_")] || 0)
+        }}))
+        .filter(row => Math.abs(row.value) > 0.000001)
+        .map(row => `${{row.label}}: ${{formatOverviewNumber(row.value)}}`);
     }}
     function sortableValue(row, key, absolute = false) {{
       const value = row[key];
@@ -699,6 +781,36 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         header.append(th);
       }}
     }}
+    function overviewTotals(rows) {{
+      const totals = {{}};
+      for (const column of overviewColumns) {{
+        if (column.numeric) totals[column.key] = 0;
+      }}
+      for (const row of rows) {{
+        for (const column of overviewColumns) {{
+          if (column.numeric) totals[column.key] += Number(row[column.key] || 0);
+        }}
+      }}
+      return totals;
+    }}
+    function renderTableFooter(rows) {{
+      const footer = document.getElementById("goodsFooterRow");
+      footer.replaceChildren();
+      const totals = overviewTotals(rows);
+      for (const column of overviewColumns) {{
+        if (!column.numeric) {{
+          const th = document.createElement("th");
+          th.textContent = "Total";
+          th.title = "Visible overview total";
+          footer.append(th);
+          continue;
+        }}
+        const td = document.createElement("td");
+        td.className = "numeric";
+        setNumericCell(td, totals[column.key]);
+        footer.append(td);
+      }}
+    }}
     function marketLabel(market) {{
       if (!market) return "Global";
       return `${{market.market_center_slug || "Market"}} (#${{market.market_id}})`;
@@ -747,6 +859,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       const body = document.getElementById("goodsBody");
       body.replaceChildren();
       const rows = sortedOverviewRows();
+      renderTableFooter(rows);
       for (const row of rows) {{
         const tr = document.createElement("tr");
         if (row.good_id === selectedGood) tr.className = "selected";
@@ -759,8 +872,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           const td = document.createElement("td");
           if (column.numeric) td.className = "numeric";
           if (column.numeric) {{
-            td.textContent = formatOverviewNumber(row[column.key]);
-            td.title = exactNumberTitle(row[column.key]);
+            setNumericCell(td, row[column.key]);
           }} else {{
             td.textContent = row[column.key];
             td.title = row[column.key] || "";
@@ -775,8 +887,40 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       setOverviewNumber(document.getElementById("supplyMetric"), row.supply);
       setOverviewNumber(document.getElementById("demandMetric"), row.demand);
       setOverviewNumber(document.getElementById("netMetric"), row.net);
+      renderLabourPool();
       document.getElementById("scopeLabel").textContent =
         `${{selectedGood || "No good"}} · ${{marketLabel(selectedMarket())}}`;
+    }}
+    function renderLabourPool() {{
+      const pool = selectedPopulationPool();
+      const container = document.getElementById("labourPool");
+      container.replaceChildren();
+      const totals = document.createElement("div");
+      totals.className = "pool-totals";
+      const employed = Number(pool.employed_total || 0);
+      const unemployed = Number(pool.unemployed_total || 0);
+      for (const item of [
+        ["Employed", employed],
+        ["Unemployed", unemployed],
+        ["Labour pool", employed + unemployed]
+      ]) {{
+        const metric = document.createElement("div");
+        const label = document.createElement("div");
+        label.className = "metric-label";
+        label.textContent = item[0];
+        const value = document.createElement("div");
+        value.className = "metric-value";
+        setOverviewNumber(value, item[1]);
+        metric.append(label, value);
+        totals.append(metric);
+      }}
+      const breakdown = document.createElement("div");
+      breakdown.className = "pool-breakdown";
+      const lines = unemployedDetailLines(pool);
+      breakdown.textContent = lines.length
+        ? `Unemployed by pop: ${{lines.join(" | ")}}`
+        : "Unemployed by pop: none";
+      container.append(totals, breakdown);
     }}
     function inScope(row) {{
       return row.good_id === selectedGood

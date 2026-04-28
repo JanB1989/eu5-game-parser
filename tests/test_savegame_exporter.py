@@ -58,10 +58,37 @@ def test_load_savegame_tables_from_text_fixture(tmp_path: Path) -> None:
     assert tables.building_methods.height == 2
     assert tables.rgo_flows.height == 2
     assert tables.production_method_population_flows.height == 4
+    assert tables.market_population_pools.height == 2
     building = tables.buildings.row(0, named=True)
     assert building["building_type"] == "mason"
     assert building["market_id"] == 1
     assert building["active_method_ids"] == ["masonry_rework", "stone_bricks"]
+
+    assert tables.locations.select(pl.col("unemployed_total").sum()).item() == pytest.approx(
+        14.0
+    )
+    assert tables.locations.select(pl.col("unemployed_laborers").sum()).item() == pytest.approx(
+        5.0
+    )
+    assert tables.locations.select(pl.col("unemployed_burghers").sum()).item() == pytest.approx(
+        4.0
+    )
+    assert tables.locations.select(pl.col("unemployed_peasants").sum()).item() == pytest.approx(
+        5.0
+    )
+    market_pool = tables.market_population_pools.filter(pl.col("market_id") == 1).row(
+        0, named=True
+    )
+    assert market_pool["employed_total"] == pytest.approx(4.0)
+    assert market_pool["employed_laborers"] == pytest.approx(4.0)
+    assert market_pool["unemployed_total"] == pytest.approx(14.0)
+    assert market_pool["unemployed_laborers"] == pytest.approx(5.0)
+    global_pool = tables.market_population_pools.filter(pl.col("market_id").is_null()).row(
+        0, named=True
+    )
+    assert global_pool["market_center_slug"] == "Global"
+    assert global_pool["employed_total"] == pytest.approx(market_pool["employed_total"])
+    assert global_pool["unemployed_total"] == pytest.approx(market_pool["unemployed_total"])
 
     masonry = tables.market_goods.filter(pl.col("good_id") == "masonry").row(0, named=True)
     assert masonry["default_price"] == 8.0
@@ -242,6 +269,7 @@ def test_write_savegame_parquet_writes_all_tables(tmp_path: Path) -> None:
         "rgo_flows",
         "production_method_good_flows",
         "production_method_population_flows",
+        "market_population_pools",
         "accounting_checks",
     }
     assert {path.stem for path in output.glob("*.parquet")} == expected
@@ -262,29 +290,40 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "Overview" in html
     assert "Good Flow" in html
     assert "const payload =" in html
+    assert '"populationPools":' in html
     assert '"good_id": "masonry"' in html
     assert '"production_method": "stone_bricks"' in html
     assert "function graphElements" in html
     assert "function renderOverviewGraph" in html
     assert 'id="goodsHeaderRow"' in html
+    assert 'id="goodsFooterRow"' in html
+    assert 'id="labourPool"' in html
     assert "let overviewSort = { key: \"net\", direction: \"desc\", absolute: true }" in html
     assert "function formatOverviewNumber" in html
     assert "maximumFractionDigits: 0" in html
-    assert "td.title = exactNumberTitle(row[column.key])" in html
+    assert "function setNumericCell" in html
+    assert "element.title = exactNumberTitle(value)" in html
     assert "font-variant-numeric: tabular-nums" in html
     assert "td:first-child" in html
     assert "function compareOverviewRows" in html
     assert "function sortedOverviewRows" in html
     assert "function setOverviewSort" in html
     assert "function renderTableHeader" in html
+    assert "function renderTableFooter" in html
+    assert "function renderLabourPool" in html
+    assert "function selectedPopulationPool" in html
     assert "sort-header" in html
     assert "sort-indicator" in html
     assert "location_count" in html
     payload = _embedded_payload(html)
     assert "bucketFlows" in payload
     assert "rgoFlows" in payload
+    assert "populationPools" in payload
     assert "employed_laborers" in payload["goods"][0]
+    assert "unemployed_total" not in payload["goods"][0]
+    assert any(row.get("unemployed_total", 0) == 14.0 for row in payload["populationPools"])
     assert any(row.get("employed_laborers", 0) > 0 for row in payload["marketGoods"])
+    assert all("unemployed_laborers" not in row for row in payload["marketGoods"])
     assert any(row.get("employed_total", 0) > 0 for row in payload["flows"])
     assert _graph_supply(payload, "masonry") == 11.0
     assert _graph_demand(payload, "masonry") == 3.0
@@ -326,6 +365,7 @@ def test_savegame_cli_writes_parquet_tables(tmp_path: Path) -> None:
     assert (output / "market_good_bucket_flows.parquet").exists()
     assert (output / "rgo_flows.parquet").exists()
     assert (output / "production_method_population_flows.parquet").exists()
+    assert (output / "market_population_pools.parquet").exists()
     assert pl.read_parquet(output / "accounting_checks.parquet")["status"].to_list() == ["ok"] * 3
 
 
