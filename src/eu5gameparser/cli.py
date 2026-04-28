@@ -19,6 +19,11 @@ from eu5gameparser.domain.buildings import load_building_data
 from eu5gameparser.domain.eu5 import load_eu5_data
 from eu5gameparser.domain.goods import load_goods_data
 from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH, LoadOrderConfig
+from eu5gameparser.savegame import (
+    DEFAULT_SAVE_GAMES_DIR,
+    write_savegame_explorer_html,
+    write_savegame_parquet,
+)
 
 app = typer.Typer(help="Parse Europa Universalis V game files.")
 
@@ -137,6 +142,42 @@ def goods(
     _print_header(profile, output)
     _print_table_summary("goods", data.goods)
     _print_warnings(data.warnings)
+
+
+@app.command("savegame")
+def savegame(
+    save: Annotated[Path | None, typer.Option(help="Explicit .eu5 save file.")] = None,
+    save_dir: Annotated[
+        Path,
+        typer.Option(help="Directory used when --save is omitted."),
+    ] = DEFAULT_SAVE_GAMES_DIR,
+    load_order: Annotated[
+        Path, typer.Option(help="Load-order TOML file.")
+    ] = DEFAULT_LOAD_ORDER_PATH,
+    profile: Annotated[str, typer.Option(help="Data profile to parse.")] = "merged_default",
+    output: Annotated[Path, typer.Option(help="Output directory.")] = Path("out/savegame"),
+    force_rakaly: Annotated[
+        bool,
+        typer.Option(
+            help="Force the optional Rakaly/pyeu5 fallback instead of native text parsing."
+        ),
+    ] = False,
+) -> None:
+    tables = write_savegame_parquet(
+        output,
+        save_path=save,
+        save_dir=save_dir,
+        profile=profile,
+        load_order_path=load_order,
+        force_rakaly=force_rakaly,
+    )
+    explorer_path = write_savegame_explorer_html(tables, output / "savegame_explorer.html")
+    _print_header(profile, output)
+    typer.echo(f"explorer: {explorer_path}")
+    typer.echo("")
+    typer.echo("Savegame")
+    for name, table in tables.as_dict().items():
+        _print_table_summary(name, table)
 
 
 @app.command("goods-flow", hidden=True)

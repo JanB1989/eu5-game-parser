@@ -1,0 +1,839 @@
+from __future__ import annotations
+
+import html
+import json
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+
+from eu5gameparser.savegame.exporter import SavegameTables
+
+
+def write_savegame_explorer_html(tables: SavegameTables, path: str | Path) -> Path:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(_standalone_html(_payload(tables)), encoding="utf-8")
+    return output_path
+
+
+def _payload(tables: SavegameTables) -> dict[str, Any]:
+    market_goods = tables.market_goods
+    flows = tables.production_method_good_flows
+    metadata = tables.save_metadata.to_dicts()[0] if not tables.save_metadata.is_empty() else {}
+
+    return {
+        "metadata": metadata,
+        "markets": _market_rows(tables.markets),
+        "goods": _goods_rows(market_goods),
+        "marketGoods": _selected_market_goods_rows(market_goods),
+        "bucketFlows": _bucket_flow_rows(tables.market_good_bucket_flows),
+        "flows": _flow_rows(flows),
+        "rgoFlows": _rgo_flow_rows(tables.rgo_flows),
+    }
+
+
+def _market_rows(markets: pl.DataFrame) -> list[dict[str, Any]]:
+    if markets.is_empty():
+        return []
+    return markets.select(
+        [
+            "market_id",
+            "market_center_slug",
+            "center_location_id",
+            "food",
+            "food_max",
+            "price",
+            "population",
+            "capacity",
+        ]
+    ).sort("market_id").to_dicts()
+
+
+def _goods_rows(market_goods: pl.DataFrame) -> list[dict[str, Any]]:
+    if market_goods.is_empty():
+        return []
+    return (
+        market_goods.group_by("good_id")
+        .agg(
+            [
+                pl.col("supply").fill_null(0).sum().alias("supply"),
+                pl.col("demand").fill_null(0).sum().alias("demand"),
+                pl.col("net").fill_null(0).sum().alias("net"),
+                pl.col("stockpile").fill_null(0).sum().alias("stockpile"),
+                pl.col("price").mean().alias("avg_price"),
+                pl.col("default_price").max().alias("default_price"),
+            ]
+        )
+        .sort("good_id")
+        .to_dicts()
+    )
+
+
+def _selected_market_goods_rows(market_goods: pl.DataFrame) -> list[dict[str, Any]]:
+    if market_goods.is_empty():
+        return []
+    columns = [
+        "market_id",
+        "market_center_slug",
+        "good_id",
+        "price",
+        "default_price",
+        "supply",
+        "demand",
+        "net",
+        "stockpile",
+        "supplied_Production",
+        "demanded_Building",
+    ]
+    selected = [column for column in columns if column in market_goods.columns]
+    return market_goods.select(selected).sort(["market_id", "good_id"]).to_dicts()
+
+
+def _flow_rows(flows: pl.DataFrame) -> list[dict[str, Any]]:
+    if flows.is_empty():
+        return []
+    return (
+        flows.group_by(
+            [
+                "market_id",
+                "market_center_slug",
+                "good_id",
+                "direction",
+                "production_method",
+                "building_type",
+            ]
+        )
+        .agg(
+            [
+                pl.col("allocated_amount").fill_null(0).sum().alias("allocated_amount"),
+                pl.col("nominal_amount").fill_null(0).sum().alias("nominal_amount"),
+                pl.col("building_count").fill_null(0).sum().alias("building_count"),
+                pl.col("level_sum").fill_null(0).sum().alias("level_sum"),
+            ]
+        )
+        .sort(["good_id", "direction", "production_method"])
+        .to_dicts()
+    )
+
+
+def _bucket_flow_rows(bucket_flows: pl.DataFrame) -> list[dict[str, Any]]:
+    if bucket_flows.is_empty():
+        return []
+    return bucket_flows.sort(["market_id", "good_id", "direction", "bucket"]).to_dicts()
+
+
+def _rgo_flow_rows(rgo_flows: pl.DataFrame) -> list[dict[str, Any]]:
+    if rgo_flows.is_empty():
+        return []
+    return (
+        rgo_flows.group_by(
+            [
+                "market_id",
+                "market_center_slug",
+                "good_id",
+                "location_id",
+                "location_slug",
+                "raw_material",
+            ]
+        )
+        .agg(
+            [
+                pl.col("allocated_amount").fill_null(0).sum().alias("allocated_amount"),
+                pl.col("nominal_amount").fill_null(0).sum().alias("nominal_amount"),
+                pl.col("rgo_employed").fill_null(0).sum().alias("rgo_employed"),
+                pl.col("max_raw_material_workers")
+                .fill_null(0)
+                .sum()
+                .alias("max_raw_material_workers"),
+            ]
+        )
+        .sort(["good_id", "allocated_amount"], descending=[False, True])
+        .to_dicts()
+    )
+
+
+def _standalone_html(payload: dict[str, Any]) -> str:
+    metadata = payload.get("metadata") or {}
+    title = "EU5 Savegame Market Explorer"
+    save_name = metadata.get("playthrough_name") or metadata.get("save_label") or "Savegame"
+    save_date = metadata.get("date") or "unknown date"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+  <style>
+    * {{ box-sizing: border-box; }}
+    html, body {{ height: 100%; margin: 0; }}
+    body {{
+      background: #f6f8fb;
+      color: #172033;
+      font-family: Inter, Segoe UI, system-ui, sans-serif;
+      overflow: hidden;
+    }}
+    .shell {{
+      display: grid;
+      grid-template-rows: auto 1fr;
+      height: 100vh;
+      width: 100vw;
+    }}
+    header {{
+      align-items: center;
+      background: #ffffff;
+      border-bottom: 1px solid #d7e0ec;
+      display: flex;
+      gap: 16px;
+      min-height: 62px;
+      padding: 10px 16px;
+    }}
+    h1 {{
+      font-size: 16px;
+      line-height: 1.2;
+      margin: 0;
+    }}
+    .meta {{
+      color: #5b677a;
+      font-size: 12px;
+    }}
+    .spacer {{ flex: 1; }}
+    .tabs, .controls {{
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    button, select, input {{
+      background: #ffffff;
+      border: 1px solid #c5d0de;
+      border-radius: 6px;
+      color: #172033;
+      font: inherit;
+      font-size: 13px;
+      min-height: 32px;
+      padding: 6px 9px;
+    }}
+    button {{
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    button:hover {{ background: #eef3f8; }}
+    button.active {{
+      background: #1f6feb;
+      border-color: #1f6feb;
+      color: #ffffff;
+    }}
+    input {{ min-width: 220px; }}
+    main {{
+      display: grid;
+      grid-template-columns: 390px minmax(0, 1fr);
+      min-height: 0;
+    }}
+    aside {{
+      background: #ffffff;
+      border-right: 1px solid #d7e0ec;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-width: 0;
+      overflow: hidden;
+    }}
+    .panel-head {{
+      border-bottom: 1px solid #e4ebf3;
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+    }}
+    .metrics {{
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .metric {{
+      background: #f8fafc;
+      border: 1px solid #dce5ef;
+      border-radius: 6px;
+      padding: 8px;
+    }}
+    .metric-label {{
+      color: #5b677a;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }}
+    .metric-value {{
+      font-size: 16px;
+      font-weight: 700;
+      margin-top: 3px;
+    }}
+    .table-wrap {{
+      min-height: 0;
+      overflow: auto;
+    }}
+    table {{
+      border-collapse: collapse;
+      font-size: 12px;
+      width: 100%;
+    }}
+    th, td {{
+      border-bottom: 1px solid #edf2f7;
+      padding: 7px 9px;
+      text-align: right;
+      white-space: nowrap;
+    }}
+    th:first-child, td:first-child {{ text-align: left; }}
+    th {{
+      background: #f8fafc;
+      color: #536173;
+      font-size: 11px;
+      position: sticky;
+      text-transform: uppercase;
+      top: 0;
+      z-index: 1;
+    }}
+    tr {{
+      cursor: pointer;
+    }}
+    tr:hover, tr.selected {{
+      background: #edf5ff;
+    }}
+    #cy {{
+      height: 100%;
+      min-width: 0;
+      width: 100%;
+    }}
+    .hidden {{ display: none; }}
+    @media (max-width: 900px) {{
+      body {{ overflow: auto; }}
+      .shell {{ min-height: 100vh; height: auto; }}
+      main {{ grid-template-columns: 1fr; }}
+      aside {{ min-height: 360px; border-right: 0; border-bottom: 1px solid #d7e0ec; }}
+      #cy {{ height: 70vh; }}
+      header {{ align-items: flex-start; flex-direction: column; }}
+      input {{ min-width: 0; width: 100%; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <h1>{html.escape(str(save_name))}</h1>
+        <div class="meta">{html.escape(str(save_date))} &middot; Savegame market explorer</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="tabs">
+        <button id="overviewTab" type="button" class="active">Overview</button>
+        <button id="flowTab" type="button">Good Flow</button>
+      </div>
+      <div class="controls">
+        <input id="goodSearch" list="goodOptions" placeholder="Search goods">
+        <datalist id="goodOptions"></datalist>
+        <input id="marketSearch" list="marketOptions" placeholder="All markets">
+        <datalist id="marketOptions"></datalist>
+        <button type="button" onclick="cy.fit(undefined, 70)">Fit</button>
+      </div>
+    </header>
+    <main>
+      <aside>
+        <div class="panel-head">
+          <div class="metrics">
+            <div class="metric">
+              <div class="metric-label">Supply</div>
+              <div class="metric-value" id="supplyMetric">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Demand</div>
+              <div class="metric-value" id="demandMetric">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Net</div>
+              <div class="metric-value" id="netMetric">0</div>
+            </div>
+          </div>
+          <div class="meta" id="scopeLabel"></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Good</th>
+                <th>Supply</th>
+                <th>Demand</th>
+                <th>Net</th>
+              </tr>
+            </thead>
+            <tbody id="goodsBody"></tbody>
+          </table>
+        </div>
+      </aside>
+      <div id="cy"></div>
+    </main>
+  </div>
+  <script>
+    const payload = {json.dumps(payload, ensure_ascii=False)};
+    const goods = payload.goods || [];
+    const markets = payload.markets || [];
+    const marketGoods = payload.marketGoods || [];
+    const bucketFlows = payload.bucketFlows || [];
+    const flows = payload.flows || [];
+    const rgoFlows = payload.rgoFlows || [];
+    let currentView = "overview";
+    let selectedGood = goods[0]?.good_id || "";
+    let selectedMarketId = null;
+
+    const cy = cytoscape({{
+      container: document.getElementById("cy"),
+      elements: [],
+      minZoom: 0.25,
+      maxZoom: 2.5,
+      wheelSensitivity: 0.08,
+      style: [
+        {{
+          selector: "node",
+          style: {{
+            "background-color": "data(color)",
+            "border-color": "#172033",
+            "border-opacity": 0.18,
+            "border-width": 1,
+            "color": "#172033",
+            "font-size": 11,
+            "height": "label",
+            "label": "data(label)",
+            "padding": "10px",
+            "shape": "round-rectangle",
+            "text-halign": "center",
+            "text-valign": "center",
+            "text-wrap": "wrap",
+            "width": "label"
+          }}
+        }},
+        {{
+          selector: ".good",
+          style: {{
+            "background-color": "#ffffff",
+            "border-color": "#1f6feb",
+            "border-width": 3,
+            "font-size": 13,
+            "font-weight": 700,
+            "padding": "14px"
+          }}
+        }},
+        {{
+          selector: ".producer",
+          style: {{ "background-color": "#dcfce7", "border-color": "#15803d" }}
+        }},
+        {{
+          selector: ".consumer",
+          style: {{ "background-color": "#fee2e2", "border-color": "#b91c1c" }}
+        }},
+        {{
+          selector: ".unallocated",
+          style: {{
+            "background-color": "#f1f5f9",
+            "border-style": "dashed",
+            "color": "#475569"
+          }}
+        }},
+        {{
+          selector: "edge",
+          style: {{
+            "curve-style": "bezier",
+            "font-size": 10,
+            "label": "data(label)",
+            "line-color": "data(color)",
+            "target-arrow-color": "data(color)",
+            "target-arrow-shape": "triangle",
+            "text-background-color": "#ffffff",
+            "text-background-opacity": 0.85,
+            "text-background-padding": "2px",
+            "width": "data(width)"
+          }}
+        }}
+      ]
+    }});
+    window.cy = cy;
+
+    function formatNumber(value) {{
+      const number = Number(value || 0);
+      return number.toLocaleString(undefined, {{ maximumFractionDigits: 2 }});
+    }}
+    function marketLabel(market) {{
+      if (!market) return "Global";
+      return `${{market.market_center_slug || "Market"}} (#${{market.market_id}})`;
+    }}
+    function selectedMarket() {{
+      return markets.find(market => market.market_id === selectedMarketId) || null;
+    }}
+    function rowsForScope() {{
+      if (selectedMarketId === null) return goods;
+      const rows = marketGoods.filter(row => row.market_id === selectedMarketId);
+      return rows.map(row => ({{
+        good_id: row.good_id,
+        supply: row.supply || 0,
+        demand: row.demand || 0,
+        net: row.net || 0,
+        stockpile: row.stockpile || 0,
+        avg_price: row.price,
+        default_price: row.default_price
+      }}));
+    }}
+    function selectedGoodRow() {{
+      return rowsForScope().find(row => row.good_id === selectedGood) || null;
+    }}
+    function fillOptions() {{
+      const goodOptions = document.getElementById("goodOptions");
+      goodOptions.replaceChildren();
+      for (const good of goods) {{
+        const option = document.createElement("option");
+        option.value = good.good_id;
+        goodOptions.append(option);
+      }}
+      const marketOptions = document.getElementById("marketOptions");
+      marketOptions.replaceChildren();
+      const all = document.createElement("option");
+      all.value = "Global";
+      marketOptions.append(all);
+      for (const market of markets) {{
+        const option = document.createElement("option");
+        option.value = marketLabel(market);
+        marketOptions.append(option);
+      }}
+    }}
+    function renderTable() {{
+      const body = document.getElementById("goodsBody");
+      body.replaceChildren();
+      const rows = rowsForScope()
+        .slice()
+        .sort((left, right) => Math.abs(right.net || 0) - Math.abs(left.net || 0));
+      for (const row of rows) {{
+        const tr = document.createElement("tr");
+        if (row.good_id === selectedGood) tr.className = "selected";
+        tr.addEventListener("click", () => {{
+          selectedGood = row.good_id;
+          document.getElementById("goodSearch").value = selectedGood;
+          render();
+        }});
+        for (const value of [
+          row.good_id,
+          formatNumber(row.supply),
+          formatNumber(row.demand),
+          formatNumber(row.net)
+        ]) {{
+          const td = document.createElement("td");
+          td.textContent = value;
+          tr.append(td);
+        }}
+        body.append(tr);
+      }}
+    }}
+    function updateMetrics() {{
+      const row = selectedGoodRow() || {{ supply: 0, demand: 0, net: 0 }};
+      document.getElementById("supplyMetric").textContent = formatNumber(row.supply);
+      document.getElementById("demandMetric").textContent = formatNumber(row.demand);
+      document.getElementById("netMetric").textContent = formatNumber(row.net);
+      document.getElementById("scopeLabel").textContent =
+        `${{selectedGood || "No good"}} · ${{marketLabel(selectedMarket())}}`;
+    }}
+    function inScope(row) {{
+      return row.good_id === selectedGood
+        && (selectedMarketId === null || row.market_id === selectedMarketId);
+    }}
+    function aggregateRows(rows, keyFn, seedFn) {{
+      const grouped = new Map();
+      for (const row of rows) {{
+        const key = keyFn(row);
+        const current = grouped.get(key) || seedFn(row);
+        current.allocated_amount += Number(row.allocated_amount || row.amount || 0);
+        current.nominal_amount += Number(row.nominal_amount || 0);
+        current.building_count += Number(row.building_count || 0);
+        current.level_sum += Number(row.level_sum || 0);
+        current.rgo_employed += Number(row.rgo_employed || 0);
+        current.max_raw_material_workers += Number(row.max_raw_material_workers || 0);
+        if ("location_count" in current) {{
+          const hasLocation = row.location_id !== null && row.location_id !== undefined;
+          current.location_count += Number(
+            row.location_count || (hasLocation ? 1 : 0)
+          );
+        }}
+        grouped.set(key, current);
+      }}
+      return [...grouped.values()].sort(
+        (left, right) => Math.abs(right.allocated_amount) - Math.abs(left.allocated_amount)
+      );
+    }}
+    function bucketRows(direction) {{
+      return aggregateRows(
+        bucketFlows.filter(row => inScope(row) && row.direction === direction),
+        row => `${{row.direction}}:${{row.bucket}}`,
+        row => ({{
+          bucket: row.bucket,
+          direction: row.direction,
+          save_column: row.save_column,
+          allocated_amount: 0,
+          nominal_amount: 0,
+          building_count: 0,
+          level_sum: 0,
+          rgo_employed: 0,
+          max_raw_material_workers: 0
+        }})
+      );
+    }}
+    function methodDetailRows(direction) {{
+      return aggregateRows(
+        flows.filter(row => inScope(row) && row.direction === direction),
+        row => `${{row.production_method}}:${{row.building_type || ""}}`,
+        row => ({{
+          production_method: row.production_method,
+          building_type: row.building_type,
+          direction: row.direction,
+          allocated_amount: 0,
+          nominal_amount: 0,
+          building_count: 0,
+          level_sum: 0,
+          rgo_employed: 0,
+          max_raw_material_workers: 0
+        }})
+      ).filter(row => Math.abs(row.allocated_amount || 0) > 0.000001);
+    }}
+    function rgoDetailRows() {{
+      return aggregateRows(
+        rgoFlows.filter(row => inScope(row)),
+        row => row.good_id,
+        row => ({{
+          good_id: row.good_id,
+          raw_material: row.raw_material,
+          allocated_amount: 0,
+          nominal_amount: 0,
+          building_count: 0,
+          level_sum: 0,
+          rgo_employed: 0,
+          max_raw_material_workers: 0,
+          location_count: 0
+        }})
+      ).filter(row => Math.abs(row.allocated_amount || 0) > 0.000001);
+    }}
+    function graphElements() {{
+      const row = selectedGoodRow() || {{}};
+      const goodLabel = [
+        selectedGood,
+        `Supply ${{formatNumber(row.supply)}} · Demand ${{formatNumber(row.demand)}}`,
+        `Net ${{formatNumber(row.net)}}`,
+        `Price ${{formatNumber(row.avg_price)}} · Base ${{formatNumber(row.default_price)}}`,
+        `Stockpile ${{formatNumber(row.stockpile)}}`
+      ].join("\\n");
+      const supplyBuckets = bucketRows("supply");
+      const demandBuckets = bucketRows("demand");
+      const producers = methodDetailRows("output");
+      const rgos = rgoDetailRows();
+      const consumers = methodDetailRows("input");
+      const nodes = [{{
+        data: {{
+          id: `good:${{selectedGood}}`,
+          label: goodLabel,
+          color: "#ffffff"
+        }},
+        classes: "good"
+      }}];
+      const edges = [];
+      const addEdge = (id, source, target, amount, color) => {{
+        edges.push({{
+          data: {{
+            id,
+            source,
+            target,
+            label: formatNumber(amount),
+            color,
+            width: Math.max(2, Math.min(10, 1.5 + Math.sqrt(Math.abs(amount || 0))))
+          }}
+        }});
+      }};
+      const addBucketNode = (bucket, role) => {{
+        const id = `bucket:${{role}}:${{bucket.bucket}}`;
+        if (!nodes.some(node => node.data.id === id)) {{
+          nodes.push({{
+            data: {{
+              id,
+              label: [
+                bucket.bucket,
+                formatNumber(bucket.allocated_amount)
+              ].join("\\n"),
+              color: role === "supply" ? "#dcfce7" : "#fee2e2"
+            }},
+            classes: role === "supply" ? "producer" : "consumer"
+          }});
+        }}
+        const amount = Math.abs(bucket.allocated_amount || 0);
+        if (role === "supply") {{
+          addEdge(`edge:${{id}}:good`, id, `good:${{selectedGood}}`, amount, "#15803d");
+        }} else {{
+          addEdge(`edge:good:${{id}}`, `good:${{selectedGood}}`, id, amount, "#b91c1c");
+        }}
+        return id;
+      }};
+      const addMethodNode = (flow, role, bucketId) => {{
+        const id = `${{role}}:${{flow.production_method}}:${{flow.building_type || ""}}`;
+        if (!nodes.some(node => node.data.id === id)) {{
+          const building = flow.building_type ? `\\n${{flow.building_type}}` : "";
+          const countLine = `count: ${{formatNumber(flow.building_count)}}`;
+          const levelLine = `level sum: ${{formatNumber(flow.level_sum)}}`;
+          const isUnattributed = flow.production_method.startsWith("unattributed");
+          nodes.push({{
+            data: {{
+              id,
+              label: [
+                `${{flow.production_method}}${{building}}`,
+                formatNumber(flow.allocated_amount),
+                countLine,
+                levelLine
+              ].join("\\n"),
+              color: role === "producer" ? "#dcfce7" : "#fee2e2"
+            }},
+            classes: `${{role}} ${{isUnattributed ? "unallocated" : ""}}`
+          }});
+        }}
+        const amount = Math.abs(flow.allocated_amount || 0);
+        if (role === "producer") {{
+          addEdge(`edge:${{id}}:${{bucketId}}`, id, bucketId, amount, "#15803d");
+        }} else {{
+          addEdge(`edge:${{bucketId}}:${{id}}`, bucketId, id, amount, "#b91c1c");
+        }}
+      }};
+      const addRgoNode = (flow, bucketId) => {{
+        const scope = selectedMarketId === null ? "global" : selectedMarketId;
+        const id = `rgo:${{scope}}:${{flow.good_id}}`;
+        if (!nodes.some(node => node.data.id === id)) {{
+          nodes.push({{
+            data: {{
+              id,
+              label: [
+                `RGO ${{flow.good_id || flow.raw_material || ""}}`,
+                formatNumber(flow.allocated_amount),
+                `locations: ${{formatNumber(flow.location_count)}}`,
+                `employed: ${{formatNumber(flow.rgo_employed)}}`,
+                `max workers: ${{formatNumber(flow.max_raw_material_workers)}}`
+              ].join("\\n"),
+              color: "#d9f99d"
+            }},
+            classes: "producer"
+          }});
+        }}
+        addEdge(
+          `edge:${{id}}:${{bucketId}}`,
+          id,
+          bucketId,
+          Math.abs(flow.allocated_amount || 0),
+          "#4d7c0f"
+        );
+      }};
+      const supplyBucketIds = new Map();
+      for (const bucket of supplyBuckets) {{
+        supplyBucketIds.set(bucket.bucket, addBucketNode(bucket, "supply"));
+      }}
+      const demandBucketIds = new Map();
+      for (const bucket of demandBuckets) {{
+        demandBucketIds.set(bucket.bucket, addBucketNode(bucket, "demand"));
+      }}
+      const productionBucket = supplyBucketIds.get("Production");
+      if (productionBucket) {{
+        producers.slice(0, 80).forEach(flow => addMethodNode(flow, "producer", productionBucket));
+        rgos.slice(0, 80).forEach(flow => addRgoNode(flow, productionBucket));
+      }}
+      const buildingBucket = demandBucketIds.get("Building");
+      if (buildingBucket) {{
+        consumers.slice(0, 80).forEach(flow => addMethodNode(flow, "consumer", buildingBucket));
+      }}
+      return [...nodes, ...edges];
+    }}
+    function renderGraph() {{
+      cy.elements().remove();
+      cy.add(graphElements());
+      cy.layout({{
+        name: "dagre",
+        rankDir: "LR",
+        ranker: "network-simplex",
+        nodeSep: 70,
+        rankSep: 210,
+        fit: true,
+        padding: 70,
+        animate: false
+      }}).run();
+    }}
+    function renderOverviewGraph() {{
+      const rows = rowsForScope()
+        .slice()
+        .sort((left, right) => Math.abs(right.net || 0) - Math.abs(left.net || 0))
+        .slice(0, 35);
+      const elements = rows.map(row => ({{
+        data: {{
+          id: `overview:${{row.good_id}}`,
+          label: [
+            row.good_id,
+            `S ${{formatNumber(row.supply)}} · D ${{formatNumber(row.demand)}}`,
+            `Net ${{formatNumber(row.net)}}`
+          ].join("\\n"),
+          color: (row.net || 0) >= 0 ? "#dcfce7" : "#fee2e2"
+        }},
+        classes: row.good_id === selectedGood ? "good" : ""
+      }}));
+      cy.elements().remove();
+      cy.add(elements);
+      cy.layout({{
+        name: "grid",
+        fit: true,
+        padding: 60,
+        animate: false
+      }}).run();
+      cy.nodes().on("tap", event => {{
+        selectedGood = event.target.id().replace("overview:", "");
+        document.getElementById("goodSearch").value = selectedGood;
+        currentView = "flow";
+        syncTabs();
+        render();
+      }});
+    }}
+    function syncTabs() {{
+      document.getElementById("overviewTab").classList.toggle("active", currentView === "overview");
+      document.getElementById("flowTab").classList.toggle("active", currentView === "flow");
+    }}
+    function render() {{
+      renderTable();
+      updateMetrics();
+      syncTabs();
+      if (currentView === "overview") renderOverviewGraph();
+      else renderGraph();
+    }}
+    document.getElementById("goodSearch").addEventListener("change", event => {{
+      if (goods.some(good => good.good_id === event.target.value)) {{
+        selectedGood = event.target.value;
+        render();
+      }}
+    }});
+    document.getElementById("marketSearch").addEventListener("change", event => {{
+      const value = event.target.value.trim();
+      if (!value || value.toLowerCase() === "global") {{
+        selectedMarketId = null;
+      }} else {{
+        const match = markets.find(market => marketLabel(market) === value);
+        selectedMarketId = match ? match.market_id : selectedMarketId;
+      }}
+      render();
+    }});
+    document.getElementById("overviewTab").addEventListener("click", () => {{
+      currentView = "overview";
+      render();
+    }});
+    document.getElementById("flowTab").addEventListener("click", () => {{
+      currentView = "flow";
+      render();
+    }});
+    fillOptions();
+    document.getElementById("goodSearch").value = selectedGood;
+    render();
+  </script>
+</body>
+</html>
+"""
