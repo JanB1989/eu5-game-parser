@@ -1550,7 +1550,7 @@ def _explorer_html(
     const initialAge = {json.dumps(selected_age)};
     const initialDepth = {json.dumps(depth)};
     const initialSpecificUnlocks = {json.dumps(include_specific_unlocks)};
-    let currentLayout = "spread";
+    let currentLayout = "ranked";
     let currentExplorerView = "flow";
     const cloneElement = element => JSON.parse(JSON.stringify(element));
     const goodsByName = new Map(network.goods.map(good => [good.name, good]));
@@ -1934,8 +1934,13 @@ def _explorer_html(
     function addGoodNodeWithId(nodes, id, good, selected = false, rankedRole = null) {{
       if (nodes.has(id)) {{
         if (selected) nodes.get(id).classes = "good selected";
-        if (rankedRole && !nodes.get(id).data.ranked_role) {{
-          nodes.get(id).data.ranked_role = rankedRole;
+        if (rankedRole) {{
+          const currentRole = nodes.get(id).data.ranked_role;
+          const currentPriority = rankedRolePriority[currentRole] || 0;
+          const nextPriority = rankedRolePriority[rankedRole] || 0;
+          if (!currentRole || nextPriority >= currentPriority) {{
+            nodes.get(id).data.ranked_role = rankedRole;
+          }}
         }}
         return;
       }}
@@ -1959,8 +1964,8 @@ def _explorer_html(
         classes: selected ? "good selected" : "good"
       }});
     }}
-    function addGoodNode(nodes, good, selected = false) {{
-      addGoodNodeWithId(nodes, goodId(good), good, selected);
+    function addGoodNode(nodes, good, selected = false, rankedRole = null) {{
+      addGoodNodeWithId(nodes, goodId(good), good, selected, rankedRole);
     }}
     function addBuildingInputGoodNode(nodes, good) {{
       addGoodNodeWithId(nodes, buildingInputGoodId(good), good, false, "input_good");
@@ -2038,6 +2043,26 @@ def _explorer_html(
         method => method.building === building.name || references.has(method.name)
       );
     }}
+    const rankedRolePriority = {{
+      selected_good: 100,
+      producer_method: 90,
+      upstream_good: 80,
+      consumer_method: 70,
+      downstream_good: 60,
+      production_method: 50,
+      input_good: 40,
+      output_good: 40
+    }};
+    function setRankedRole(nodes, id, role) {{
+      const node = nodes.get(id);
+      if (!node) return;
+      const currentRole = node.data.ranked_role;
+      const currentPriority = rankedRolePriority[currentRole] || 0;
+      const nextPriority = rankedRolePriority[role] || 0;
+      if (!currentRole || nextPriority >= currentPriority) {{
+        node.data.ranked_role = role;
+      }}
+    }}
     function indexMethods(methods) {{
       const producedBy = new Map();
       const consumedBy = new Map();
@@ -2093,9 +2118,17 @@ def _explorer_html(
         const expansionKey = `${{currentGood}}:${{distance}}`;
         if (expanded.has(expansionKey) || distance >= depth) continue;
         expanded.add(expansionKey);
-        addGoodNode(nodes, currentGood, currentGood === selectedGood);
+        addGoodNode(
+          nodes,
+          currentGood,
+          currentGood === selectedGood,
+          currentGood === selectedGood ? "selected_good" : null
+        );
         for (const method of producedBy.get(currentGood) || []) {{
           addMethodNode(nodes, method);
+          if (currentGood === selectedGood) {{
+            setRankedRole(nodes, methodId(method.name), "producer_method");
+          }}
           addEdge(
             edges,
             methodId(method.name),
@@ -2103,17 +2136,35 @@ def _explorer_html(
             "produces",
             method.output,
             currentGood,
+            currentGood === selectedGood ? {{ ranked_edge_role: "selected_output" }} : {{}},
           );
           for (let index = 0; index < (method.input_goods || []).length; index += 1) {{
             const inputGood = method.input_goods[index];
             const amount = (method.input_amounts || [])[index];
-            addGoodNode(nodes, inputGood);
-            addEdge(edges, goodId(inputGood), methodId(method.name), "consumes", amount, inputGood);
+            addGoodNode(
+              nodes,
+              inputGood,
+              false,
+              currentGood === selectedGood ? "upstream_good" : null
+            );
+            addEdge(
+              edges,
+              goodId(inputGood),
+              methodId(method.name),
+              "consumes",
+              amount,
+              inputGood,
+              currentGood === selectedGood ? {{ ranked_edge_role: "producer_input" }} : {{}},
+            );
             if (distance + 1 < depth) queued.push([inputGood, distance + 1]);
           }}
         }}
         for (const method of consumedBy.get(currentGood) || []) {{
+          if (currentGood === selectedGood && method.produced === selectedGood) continue;
           addMethodNode(nodes, method);
+          if (currentGood === selectedGood) {{
+            setRankedRole(nodes, methodId(method.name), "consumer_method");
+          }}
           const inputIndex = (method.input_goods || []).indexOf(currentGood);
           const amount = inputIndex < 0 ? null : (method.input_amounts || [])[inputIndex];
           addEdge(
@@ -2123,9 +2174,15 @@ def _explorer_html(
             "consumes",
             amount,
             currentGood,
+            currentGood === selectedGood ? {{ ranked_edge_role: "selected_input" }} : {{}},
           );
           if (method.produced) {{
-            addGoodNode(nodes, method.produced);
+            addGoodNode(
+              nodes,
+              method.produced,
+              false,
+              currentGood === selectedGood ? "downstream_good" : null
+            );
             addEdge(
               edges,
               methodId(method.name),
@@ -2133,6 +2190,7 @@ def _explorer_html(
               "produces",
               method.output,
               method.produced,
+              currentGood === selectedGood ? {{ ranked_edge_role: "consumer_output" }} : {{}},
             );
             if (distance + 1 < depth) queued.push([method.produced, distance + 1]);
           }}
@@ -2339,6 +2397,13 @@ def _explorer_html(
       production_method: 0,
       output_good: 360
     }};
+    const goodRankedFallbackColumn = {{
+      upstream_good: -2,
+      producer_method: -1,
+      selected_good: 0,
+      consumer_method: 1,
+      downstream_good: 2
+    }};
     function graphSpacingFactor() {{
       const nodeCount = Math.max(1, cy.nodes().length);
       const edgeCount = cy.edges().length;
@@ -2378,6 +2443,61 @@ def _explorer_html(
         const x = scaledLayoutValue(
           buildingRankedColumnX[role] ?? buildingRankedColumnX.production_method
         );
+        nodes.forEach((node, index) => {{
+          positions[node.id()] = {{ x, y: startY + index * spacing }};
+        }});
+      }}
+      return positions;
+    }}
+    function directGoodRankedColumn(node) {{
+      return goodRankedFallbackColumn[rankedRole(node)];
+    }}
+    function goodRankedColumnMap() {{
+      const columns = new Map();
+      cy.nodes().forEach(node => {{
+        const column = directGoodRankedColumn(node);
+        if (column !== undefined) columns.set(node.id(), column);
+      }});
+      for (let pass = 0; pass < cy.nodes().length; pass += 1) {{
+        let changed = false;
+        cy.edges().forEach(edge => {{
+          const sourceId = edge.source().id();
+          const targetId = edge.target().id();
+          const sourceColumn = columns.get(sourceId);
+          const targetColumn = columns.get(targetId);
+          if (sourceColumn === undefined && targetColumn !== undefined) {{
+            columns.set(sourceId, targetColumn);
+            changed = true;
+          }}
+          if (targetColumn === undefined && sourceColumn !== undefined) {{
+            columns.set(targetId, sourceColumn);
+            changed = true;
+          }}
+        }});
+        if (!changed) break;
+      }}
+      return columns;
+    }}
+    function goodRankedPositions() {{
+      const columnMap = goodRankedColumnMap();
+      const columns = new Map();
+      cy.nodes().forEach(node => {{
+        const role = rankedRole(node);
+        const fallbackColumn = goodRankedFallbackColumn[role] ?? 0;
+        const column = columnMap.get(node.id()) ?? fallbackColumn;
+        if (!columns.has(column)) columns.set(column, []);
+        columns.get(column).push(node);
+      }});
+      const positions = {{}};
+      for (const [column, nodes] of [...columns.entries()].sort((left, right) => left[0] - right[0])) {{
+        nodes.sort((left, right) => {{
+          const leftLabel = left.data("label") || left.id();
+          const rightLabel = right.data("label") || right.id();
+          return leftLabel.localeCompare(rightLabel);
+        }});
+        const spacing = scaledLayoutValue(130);
+        const startY = -((nodes.length - 1) * spacing) / 2;
+        const x = scaledLayoutValue(column * 260);
         nodes.forEach((node, index) => {{
           positions[node.id()] = {{ x, y: startY + index * spacing }};
         }});
@@ -2472,6 +2592,17 @@ def _explorer_html(
       const positions = buildingRankedPositions();
       assignBuildingRankedEdgeAnchors();
       cy.edges().addClass("building-ranked-edge");
+      cy.layout({{
+        name: "preset",
+        fit: true,
+        padding: 100,
+        animate: false,
+        positions: node => positions[node.id()] || {{ x: 0, y: 0 }}
+      }}).run();
+    }}
+    function runGoodRankedLayout() {{
+      const positions = goodRankedPositions();
+      cy.edges().removeClass("building-ranked-edge");
       cy.layout({{
         name: "preset",
         fit: true,
@@ -2583,13 +2714,7 @@ def _explorer_html(
         runBuildingRankedLayout();
         return;
       }}
-      cy.edges().removeClass("building-ranked-edge");
-      cy.layout({{
-        ...rankedLayout,
-        nodeSep: scaledLayoutValue(130),
-        edgeSep: scaledLayoutValue(48),
-        rankSep: scaledLayoutValue(260)
-      }}).run();
+      runGoodRankedLayout();
     }}
     function updateExplorerControls() {{
       const overviewActive = currentExplorerView === "overview";

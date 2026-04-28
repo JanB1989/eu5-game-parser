@@ -328,6 +328,18 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert "function buildingVisible" in html
     assert "function buildingRankedPositions" in html
     assert "function runBuildingRankedLayout" in html
+    assert "function goodRankedColumnMap" in html
+    assert "function goodRankedPositions" in html
+    assert "function runGoodRankedLayout" in html
+    assert 'let currentLayout = "ranked";' in html
+    assert 'currentGood === selectedGood ? "selected_good" : null' in html
+    assert 'setRankedRole(nodes, methodId(method.name), "producer_method")' in html
+    assert 'currentGood === selectedGood && method.produced === selectedGood' in html
+    assert "function directGoodRankedColumn" in html
+    assert "const nextPriority = rankedRolePriority[rankedRole] || 0" in html
+    assert "const sourceColumn = columns.get(sourceId)" in html
+    assert "columns.set(sourceId, targetColumn)" in html
+    assert "sourceId, column - 1" not in html
     assert "function graphSpacingFactor" in html
     assert "function scaledLayoutValue" in html
     assert "function buildingInputGoodId" in html
@@ -335,8 +347,9 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert "function addBuildingInputGoodNode" in html
     assert "function addBuildingOutputGoodNode" in html
     assert 'currentSelectionType() === "building"' in html
-    assert "nodeSep: scaledLayoutValue(130)" in html
-    assert "rankSep: scaledLayoutValue(260)" in html
+    assert "runGoodRankedLayout()" in html
+    assert "const goodRankedFallbackColumn" in html
+    assert "const x = scaledLayoutValue(column * 260)" in html
     assert "nodeSeparation: scaledLayoutValue(120)" in html
     assert '"selector": ".building-ranked-edge"' in html
     assert '"curve-style": "segments"' in html
