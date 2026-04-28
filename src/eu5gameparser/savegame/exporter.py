@@ -18,6 +18,17 @@ DEFAULT_SAVE_GAMES_DIR = Path(
 )
 TARGET_SECTIONS = frozenset({"metadata", "market_manager", "locations", "building_manager"})
 FLOAT_TOLERANCE = 1e-6
+POP_TYPES = (
+    "nobles",
+    "clergy",
+    "burghers",
+    "laborers",
+    "soldiers",
+    "peasants",
+    "slaves",
+    "tribesmen",
+)
+POP_EMPLOYED_COLUMNS = tuple(f"employed_{pop_type}" for pop_type in POP_TYPES)
 
 
 @dataclass(frozen=True)
@@ -31,6 +42,7 @@ class SavegameTables:
     building_methods: pl.DataFrame
     rgo_flows: pl.DataFrame
     production_method_good_flows: pl.DataFrame
+    production_method_population_flows: pl.DataFrame
     accounting_checks: pl.DataFrame
 
     def as_dict(self) -> dict[str, pl.DataFrame]:
@@ -44,6 +56,7 @@ class SavegameTables:
             "building_methods": self.building_methods,
             "rgo_flows": self.rgo_flows,
             "production_method_good_flows": self.production_method_good_flows,
+            "production_method_population_flows": self.production_method_population_flows,
             "accounting_checks": self.accounting_checks,
         }
 
@@ -285,6 +298,13 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         eu5_data.building_data,
     )
     bucket_flows = _market_good_bucket_flows(market_goods)
+    population_flows = _population_flow_table(
+        eu5_data.building_data,
+        locations,
+        buildings,
+        building_methods,
+        market_goods,
+    )
     flows, rgo_flows, checks = _flow_tables(
         eu5_data.building_data,
         locations,
@@ -303,6 +323,7 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         building_methods=building_methods,
         rgo_flows=rgo_flows,
         production_method_good_flows=flows,
+        production_method_population_flows=population_flows,
         accounting_checks=checks,
     )
 
@@ -342,6 +363,7 @@ def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.
             location_id = _to_int(entry.key)
             if location_id is None:
                 continue
+            rgo_employed_by_pop = _rgo_employed_by_pop(data)
             rows.append(
                 {
                     "location_id": location_id,
@@ -358,7 +380,8 @@ def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.
                     "max_raw_material_workers": _to_float(
                         _first(data, "max_raw_material_workers")
                     ),
-                    "rgo_employed": _rgo_employed(data),
+                    "rgo_employed": sum(rgo_employed_by_pop.values()),
+                    **_pop_columns(rgo_employed_by_pop),
                 }
             )
     return pl.DataFrame(rows, schema=_locations_schema())
@@ -711,6 +734,176 @@ def _rgo_nominal_flow_rows(locations: pl.DataFrame) -> list[dict[str, Any]]:
     return rows
 
 
+def _population_flow_table(
+    building_data: BuildingData,
+    locations: pl.DataFrame,
+    buildings: pl.DataFrame,
+    building_methods: pl.DataFrame,
+    market_goods: pl.DataFrame,
+) -> pl.DataFrame:
+    rows = [
+        *_building_population_flow_rows(
+            building_data,
+            buildings,
+            building_methods,
+            market_goods,
+        ),
+        *_rgo_population_flow_rows(locations),
+    ]
+    return pl.DataFrame(rows, schema=_population_flow_schema())
+
+
+def _building_population_flow_rows(
+    building_data: BuildingData,
+    buildings: pl.DataFrame,
+    building_methods: pl.DataFrame,
+    market_goods: pl.DataFrame,
+) -> list[dict[str, Any]]:
+    if buildings.is_empty() or building_methods.is_empty():
+        return []
+    building_by_id = {row["building_id"]: row for row in buildings.to_dicts()}
+    methods_by_building: dict[int, list[dict[str, Any]]] = {}
+    for active in building_methods.to_dicts():
+        methods_by_building.setdefault(active["building_id"], []).append(active)
+    method_by_name = {row["name"]: row for row in building_data.production_methods.to_dicts()}
+    pop_type_by_building = {
+        row["name"]: row.get("pop_type") for row in building_data.buildings.to_dicts()
+    }
+    market_price, default_price = _market_price_maps(market_goods)
+
+    rows: list[dict[str, Any]] = []
+    for building_id, active_methods in methods_by_building.items():
+        building = building_by_id.get(building_id)
+        if building is None or building.get("market_id") is None:
+            continue
+        methods = [
+            (active, method_by_name.get(active["production_method"]))
+            for active in active_methods
+            if method_by_name.get(active["production_method"]) is not None
+        ]
+        if not methods:
+            continue
+        employed_total = _building_basis(building)
+        if abs(employed_total) <= FLOAT_TOLERANCE:
+            continue
+        weights = [
+            _method_population_weight(
+                method,
+                building["market_id"],
+                market_price,
+                default_price,
+            )
+            for _, method in methods
+        ]
+        total_weight = sum(weights)
+        if total_weight > FLOAT_TOLERANCE:
+            shares = [weight / total_weight for weight in weights]
+            basis = "output_value"
+        else:
+            shares = [1.0 / len(methods)] * len(methods)
+            basis = "equal_fallback"
+
+        pop_type = pop_type_by_building.get(building.get("building_type"))
+        for (active, method), share, weight in zip(methods, shares, weights, strict=False):
+            amount = employed_total * share
+            rows.append(
+                {
+                    "market_id": building["market_id"],
+                    "market_center_slug": None,
+                    "good_id": method.get("produced"),
+                    "production_method": active["production_method"],
+                    "building_id": active["building_id"],
+                    "building_type": active["building_type"],
+                    "location_id": active["location_id"],
+                    "location_slug": active["location_slug"],
+                    "source_kind": "building",
+                    "allocation_basis": basis,
+                    "allocation_weight": weight,
+                    "employment_share": share,
+                    "employed_total": amount,
+                    **_single_pop_columns(pop_type, amount),
+                }
+            )
+    return rows
+
+
+def _method_population_weight(
+    method: dict[str, Any],
+    market_id: int,
+    market_price: dict[tuple[int, str], float],
+    default_price: dict[str, float],
+) -> float:
+    produced = method.get("produced")
+    output = method.get("output")
+    if produced is None or output is None:
+        return 0.0
+    price = market_price.get((market_id, produced))
+    if price is None:
+        price = default_price.get(produced)
+    if price is None:
+        price = method.get("output_value")
+        if output:
+            price = (price or 0.0) / float(output)
+    if price is None:
+        return 0.0
+    return max(float(output) * float(price), 0.0)
+
+
+def _market_price_maps(
+    market_goods: pl.DataFrame,
+) -> tuple[dict[tuple[int, str], float], dict[str, float]]:
+    market_price: dict[tuple[int, str], float] = {}
+    default_price: dict[str, float] = {}
+    if market_goods.is_empty():
+        return market_price, default_price
+    for row in market_goods.to_dicts():
+        market_id = row.get("market_id")
+        good = row.get("good_id")
+        if market_id is None or good is None:
+            continue
+        if row.get("price") is not None:
+            market_price[(market_id, good)] = float(row["price"])
+        if row.get("default_price") is not None:
+            default_price[good] = float(row["default_price"])
+    return market_price, default_price
+
+
+def _rgo_population_flow_rows(locations: pl.DataFrame) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if locations.is_empty():
+        return rows
+    for location in locations.to_dicts():
+        good = location.get("raw_material")
+        market_id = location.get("market_id")
+        if not good or market_id is None:
+            continue
+        pop_amounts = {
+            pop_type: location.get(f"employed_{pop_type}") or 0.0 for pop_type in POP_TYPES
+        }
+        employed_total = sum(pop_amounts.values())
+        if abs(employed_total) <= FLOAT_TOLERANCE:
+            continue
+        rows.append(
+            {
+                "market_id": market_id,
+                "market_center_slug": None,
+                "good_id": good,
+                "production_method": f"rgo_{good}",
+                "building_id": None,
+                "building_type": None,
+                "location_id": location.get("location_id"),
+                "location_slug": location.get("slug"),
+                "source_kind": "rgo",
+                "allocation_basis": "employed_in_rgo",
+                "allocation_weight": employed_total,
+                "employment_share": 1.0,
+                "employed_total": employed_total,
+                **_pop_columns(pop_amounts),
+            }
+        )
+    return rows
+
+
 def _accounting_check_rows(
     market_goods: pl.DataFrame,
     bucket_flows: pl.DataFrame,
@@ -839,17 +1032,26 @@ def _building_basis(building: dict[str, Any]) -> float:
     return float(level) * float(employment)
 
 
-def _rgo_employed(location: CList) -> float:
+def _rgo_employed_by_pop(location: CList) -> dict[str, float]:
     population = _as_block(_first(location, "population"))
     pop_stats = _as_block(_first(population, "pop_stats")) if population is not None else None
     if pop_stats is None:
-        return 0.0
-    total = 0.0
+        return {}
+    amounts: dict[str, float] = {}
     for entry in pop_stats.entries:
         stats = _as_block(entry.value)
         if stats is not None:
-            total += _to_float(_first(stats, "employed_in_rgo")) or 0.0
-    return total
+            amounts[entry.key] = _to_float(_first(stats, "employed_in_rgo")) or 0.0
+    return amounts
+
+
+def _pop_columns(amounts: dict[str, float]) -> dict[str, float]:
+    return {f"employed_{pop_type}": float(amounts.get(pop_type, 0.0)) for pop_type in POP_TYPES}
+
+
+def _single_pop_columns(pop_type: str | None, amount: float) -> dict[str, float]:
+    amounts = {pop_type: amount} if pop_type in POP_TYPES else {}
+    return _pop_columns(amounts)
 
 
 def _flow_target_rows(market_goods: pl.DataFrame) -> list[dict[str, Any]]:
@@ -1073,7 +1275,7 @@ def _market_goods_schema(category_columns: list[str]) -> dict[str, Any]:
 
 
 def _locations_schema() -> dict[str, Any]:
-    return {
+    schema = {
         "location_id": pl.Int64,
         "slug": pl.String,
         "owner": pl.Int64,
@@ -1088,6 +1290,8 @@ def _locations_schema() -> dict[str, Any]:
         "max_raw_material_workers": pl.Float64,
         "rgo_employed": pl.Float64,
     }
+    schema.update({column: pl.Float64 for column in POP_EMPLOYED_COLUMNS})
+    return schema
 
 
 def _buildings_schema() -> dict[str, Any]:
@@ -1169,6 +1373,26 @@ def _flow_schema() -> dict[str, Any]:
         "building_count": pl.Int64,
         "level_sum": pl.Float64,
     }
+
+
+def _population_flow_schema() -> dict[str, Any]:
+    schema = {
+        "market_id": pl.Int64,
+        "market_center_slug": pl.String,
+        "good_id": pl.String,
+        "production_method": pl.String,
+        "building_id": pl.Int64,
+        "building_type": pl.String,
+        "location_id": pl.Int64,
+        "location_slug": pl.String,
+        "source_kind": pl.String,
+        "allocation_basis": pl.String,
+        "allocation_weight": pl.Float64,
+        "employment_share": pl.Float64,
+        "employed_total": pl.Float64,
+    }
+    schema.update({column: pl.Float64 for column in POP_EMPLOYED_COLUMNS})
+    return schema
 
 
 def _accounting_schema() -> dict[str, Any]:

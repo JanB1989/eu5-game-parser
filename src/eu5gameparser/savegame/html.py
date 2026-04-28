@@ -7,7 +7,7 @@ from typing import Any
 
 import polars as pl
 
-from eu5gameparser.savegame.exporter import SavegameTables
+from eu5gameparser.savegame.exporter import POP_EMPLOYED_COLUMNS, SavegameTables
 
 
 def write_savegame_explorer_html(tables: SavegameTables, path: str | Path) -> Path:
@@ -20,16 +20,17 @@ def write_savegame_explorer_html(tables: SavegameTables, path: str | Path) -> Pa
 def _payload(tables: SavegameTables) -> dict[str, Any]:
     market_goods = tables.market_goods
     flows = tables.production_method_good_flows
+    population_flows = tables.production_method_population_flows
     metadata = tables.save_metadata.to_dicts()[0] if not tables.save_metadata.is_empty() else {}
 
     return {
         "metadata": metadata,
         "markets": _market_rows(tables.markets),
-        "goods": _goods_rows(market_goods),
-        "marketGoods": _selected_market_goods_rows(market_goods),
+        "goods": _goods_rows(market_goods, population_flows),
+        "marketGoods": _selected_market_goods_rows(market_goods, population_flows),
         "bucketFlows": _bucket_flow_rows(tables.market_good_bucket_flows),
-        "flows": _flow_rows(flows),
-        "rgoFlows": _rgo_flow_rows(tables.rgo_flows),
+        "flows": _flow_rows(flows, population_flows),
+        "rgoFlows": _rgo_flow_rows(tables.rgo_flows, population_flows),
     }
 
 
@@ -50,10 +51,11 @@ def _market_rows(markets: pl.DataFrame) -> list[dict[str, Any]]:
     ).sort("market_id").to_dicts()
 
 
-def _goods_rows(market_goods: pl.DataFrame) -> list[dict[str, Any]]:
+def _goods_rows(market_goods: pl.DataFrame, population_flows: pl.DataFrame) -> list[dict[str, Any]]:
     if market_goods.is_empty():
         return []
-    return (
+    population_by_good = _population_by_key(population_flows, ["good_id"])
+    rows = (
         market_goods.group_by("good_id")
         .agg(
             [
@@ -68,11 +70,15 @@ def _goods_rows(market_goods: pl.DataFrame) -> list[dict[str, Any]]:
         .sort("good_id")
         .to_dicts()
     )
+    return [_merge_population(row, (row["good_id"],), population_by_good) for row in rows]
 
 
-def _selected_market_goods_rows(market_goods: pl.DataFrame) -> list[dict[str, Any]]:
+def _selected_market_goods_rows(
+    market_goods: pl.DataFrame, population_flows: pl.DataFrame
+) -> list[dict[str, Any]]:
     if market_goods.is_empty():
         return []
+    population_by_market_good = _population_by_key(population_flows, ["market_id", "good_id"])
     columns = [
         "market_id",
         "market_center_slug",
@@ -87,13 +93,20 @@ def _selected_market_goods_rows(market_goods: pl.DataFrame) -> list[dict[str, An
         "demanded_Building",
     ]
     selected = [column for column in columns if column in market_goods.columns]
-    return market_goods.select(selected).sort(["market_id", "good_id"]).to_dicts()
+    rows = market_goods.select(selected).sort(["market_id", "good_id"]).to_dicts()
+    return [
+        _merge_population(row, (row["market_id"], row["good_id"]), population_by_market_good)
+        for row in rows
+    ]
 
 
-def _flow_rows(flows: pl.DataFrame) -> list[dict[str, Any]]:
+def _flow_rows(flows: pl.DataFrame, population_flows: pl.DataFrame) -> list[dict[str, Any]]:
     if flows.is_empty():
         return []
-    return (
+    population_by_method = _population_by_key(
+        population_flows, ["market_id", "production_method", "building_type"]
+    )
+    rows = (
         flows.group_by(
             [
                 "market_id",
@@ -115,6 +128,14 @@ def _flow_rows(flows: pl.DataFrame) -> list[dict[str, Any]]:
         .sort(["good_id", "direction", "production_method"])
         .to_dicts()
     )
+    return [
+        _merge_population(
+            row,
+            (row["market_id"], row["production_method"], row["building_type"]),
+            population_by_method,
+        )
+        for row in rows
+    ]
 
 
 def _bucket_flow_rows(bucket_flows: pl.DataFrame) -> list[dict[str, Any]]:
@@ -123,10 +144,12 @@ def _bucket_flow_rows(bucket_flows: pl.DataFrame) -> list[dict[str, Any]]:
     return bucket_flows.sort(["market_id", "good_id", "direction", "bucket"]).to_dicts()
 
 
-def _rgo_flow_rows(rgo_flows: pl.DataFrame) -> list[dict[str, Any]]:
+def _rgo_flow_rows(rgo_flows: pl.DataFrame, population_flows: pl.DataFrame) -> list[dict[str, Any]]:
     if rgo_flows.is_empty():
         return []
-    return (
+    rgo_population = population_flows.filter(pl.col("source_kind") == "rgo")
+    population_by_rgo = _population_by_key(rgo_population, ["market_id", "good_id", "location_id"])
+    rows = (
         rgo_flows.group_by(
             [
                 "market_id",
@@ -151,6 +174,57 @@ def _rgo_flow_rows(rgo_flows: pl.DataFrame) -> list[dict[str, Any]]:
         .sort(["good_id", "allocated_amount"], descending=[False, True])
         .to_dicts()
     )
+    return [
+        _merge_population(
+            row,
+            (row["market_id"], row["good_id"], row["location_id"]),
+            population_by_rgo,
+        )
+        for row in rows
+    ]
+
+
+def _population_by_key(
+    population_flows: pl.DataFrame, keys: list[str]
+) -> dict[tuple[Any, ...], dict[str, float]]:
+    if population_flows.is_empty():
+        return {}
+    columns = [*keys, "employed_total", *POP_EMPLOYED_COLUMNS]
+    selected = [column for column in columns if column in population_flows.columns]
+    grouped = (
+        population_flows.select(selected)
+        .group_by(keys)
+        .agg(
+            [
+                pl.col("employed_total").fill_null(0).sum().alias("employed_total"),
+                *[
+                    pl.col(column).fill_null(0).sum().alias(column)
+                    for column in POP_EMPLOYED_COLUMNS
+                    if column in population_flows.columns
+                ],
+            ]
+        )
+    )
+    result: dict[tuple[Any, ...], dict[str, float]] = {}
+    for row in grouped.to_dicts():
+        key = tuple(row.get(column) for column in keys)
+        result[key] = {
+            "employed_total": row.get("employed_total") or 0.0,
+            **{column: row.get(column) or 0.0 for column in POP_EMPLOYED_COLUMNS},
+        }
+    return result
+
+
+def _merge_population(
+    row: dict[str, Any],
+    key: tuple[Any, ...],
+    population: dict[tuple[Any, ...], dict[str, float]],
+) -> dict[str, Any]:
+    values = population.get(
+        key,
+        {"employed_total": 0.0, **{column: 0.0 for column in POP_EMPLOYED_COLUMNS}},
+    )
+    return {**row, **values}
 
 
 def _standalone_html(payload: dict[str, Any]) -> str:
@@ -230,7 +304,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     input {{ min-width: 220px; }}
     main {{
       display: grid;
-      grid-template-columns: 390px minmax(0, 1fr);
+      grid-template-columns: clamp(760px, 52vw, 1040px) minmax(0, 1fr);
       min-height: 0;
     }}
     aside {{
@@ -276,6 +350,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     table {{
       border-collapse: collapse;
       font-size: 12px;
+      min-width: 920px;
       width: 100%;
     }}
     th, td {{
@@ -306,7 +381,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       width: 100%;
     }}
     .hidden {{ display: none; }}
-    @media (max-width: 900px) {{
+    @media (max-width: 1100px) {{
       body {{ overflow: auto; }}
       .shell {{ min-height: 100vh; height: auto; }}
       main {{ grid-template-columns: 1fr; }}
@@ -364,6 +439,15 @@ def _standalone_html(payload: dict[str, Any]) -> str:
                 <th>Supply</th>
                 <th>Demand</th>
                 <th>Net</th>
+                <th>Emp</th>
+                <th>Nobles</th>
+                <th>Clergy</th>
+                <th>Burghers</th>
+                <th>Laborers</th>
+                <th>Soldiers</th>
+                <th>Peasants</th>
+                <th>Slaves</th>
+                <th>Tribesmen</th>
               </tr>
             </thead>
             <tbody id="goodsBody"></tbody>
@@ -381,6 +465,16 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     const bucketFlows = payload.bucketFlows || [];
     const flows = payload.flows || [];
     const rgoFlows = payload.rgoFlows || [];
+    const popColumns = [
+      {{ key: "employed_nobles", label: "nobles" }},
+      {{ key: "employed_clergy", label: "clergy" }},
+      {{ key: "employed_burghers", label: "burghers" }},
+      {{ key: "employed_laborers", label: "laborers" }},
+      {{ key: "employed_soldiers", label: "soldiers" }},
+      {{ key: "employed_peasants", label: "peasants" }},
+      {{ key: "employed_slaves", label: "slaves" }},
+      {{ key: "employed_tribesmen", label: "tribesmen" }}
+    ];
     let currentView = "overview";
     let selectedGood = goods[0]?.good_id || "";
     let selectedMarketId = null;
@@ -461,6 +555,27 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       const number = Number(value || 0);
       return number.toLocaleString(undefined, {{ maximumFractionDigits: 2 }});
     }}
+    function emptyPopulationFields() {{
+      const fields = {{ employed_total: 0 }};
+      for (const column of popColumns) fields[column.key] = 0;
+      return fields;
+    }}
+    function populationFields(row) {{
+      const fields = {{ employed_total: Number(row.employed_total || 0) }};
+      for (const column of popColumns) fields[column.key] = Number(row[column.key] || 0);
+      return fields;
+    }}
+    function addPopulationFields(target, row) {{
+      target.employed_total += Number(row.employed_total || 0);
+      for (const column of popColumns) {{
+        target[column.key] += Number(row[column.key] || 0);
+      }}
+    }}
+    function populationDetailLines(row) {{
+      return popColumns
+        .filter(column => Math.abs(Number(row[column.key] || 0)) > 0.000001)
+        .map(column => `${{column.label}}: ${{formatNumber(row[column.key])}}`);
+    }}
     function marketLabel(market) {{
       if (!market) return "Global";
       return `${{market.market_center_slug || "Market"}} (#${{market.market_id}})`;
@@ -478,7 +593,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         net: row.net || 0,
         stockpile: row.stockpile || 0,
         avg_price: row.price,
-        default_price: row.default_price
+        default_price: row.default_price,
+        ...populationFields(row)
       }}));
     }}
     function selectedGoodRow() {{
@@ -521,7 +637,9 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           row.good_id,
           formatNumber(row.supply),
           formatNumber(row.demand),
-          formatNumber(row.net)
+          formatNumber(row.net),
+          formatNumber(row.employed_total),
+          ...popColumns.map(column => formatNumber(row[column.key]))
         ]) {{
           const td = document.createElement("td");
           td.textContent = value;
@@ -553,6 +671,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         current.level_sum += Number(row.level_sum || 0);
         current.rgo_employed += Number(row.rgo_employed || 0);
         current.max_raw_material_workers += Number(row.max_raw_material_workers || 0);
+        addPopulationFields(current, row);
         if ("location_count" in current) {{
           const hasLocation = row.location_id !== null && row.location_id !== undefined;
           current.location_count += Number(
@@ -578,7 +697,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           building_count: 0,
           level_sum: 0,
           rgo_employed: 0,
-          max_raw_material_workers: 0
+          max_raw_material_workers: 0,
+          ...emptyPopulationFields()
         }})
       );
     }}
@@ -595,7 +715,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           building_count: 0,
           level_sum: 0,
           rgo_employed: 0,
-          max_raw_material_workers: 0
+          max_raw_material_workers: 0,
+          ...emptyPopulationFields()
         }})
       ).filter(row => Math.abs(row.allocated_amount || 0) > 0.000001);
     }}
@@ -612,7 +733,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           level_sum: 0,
           rgo_employed: 0,
           max_raw_material_workers: 0,
-          location_count: 0
+          location_count: 0,
+          ...emptyPopulationFields()
         }})
       ).filter(row => Math.abs(row.allocated_amount || 0) > 0.000001);
     }}
@@ -623,7 +745,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         `Supply ${{formatNumber(row.supply)}} · Demand ${{formatNumber(row.demand)}}`,
         `Net ${{formatNumber(row.net)}}`,
         `Price ${{formatNumber(row.avg_price)}} · Base ${{formatNumber(row.default_price)}}`,
-        `Stockpile ${{formatNumber(row.stockpile)}}`
+        `Stockpile ${{formatNumber(row.stockpile)}}`,
+        `Employed ${{formatNumber(row.employed_total)}}`
       ].join("\\n");
       const supplyBuckets = bucketRows("supply");
       const demandBuckets = bucketRows("demand");
@@ -680,6 +803,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           const building = flow.building_type ? `\\n${{flow.building_type}}` : "";
           const countLine = `count: ${{formatNumber(flow.building_count)}}`;
           const levelLine = `level sum: ${{formatNumber(flow.level_sum)}}`;
+          const employmentLine = `employed: ${{formatNumber(flow.employed_total)}}`;
           const isUnattributed = flow.production_method.startsWith("unattributed");
           nodes.push({{
             data: {{
@@ -687,6 +811,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
               label: [
                 `${{flow.production_method}}${{building}}`,
                 formatNumber(flow.allocated_amount),
+                employmentLine,
+                ...populationDetailLines(flow),
                 countLine,
                 levelLine
               ].join("\\n"),
@@ -714,6 +840,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
                 formatNumber(flow.allocated_amount),
                 `locations: ${{formatNumber(flow.location_count)}}`,
                 `employed: ${{formatNumber(flow.rgo_employed)}}`,
+                ...populationDetailLines(flow),
                 `max workers: ${{formatNumber(flow.max_raw_material_workers)}}`
               ].join("\\n"),
               color: "#d9f99d"
@@ -773,7 +900,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           label: [
             row.good_id,
             `S ${{formatNumber(row.supply)}} · D ${{formatNumber(row.demand)}}`,
-            `Net ${{formatNumber(row.net)}}`
+            `Net ${{formatNumber(row.net)}}`,
+            `Emp ${{formatNumber(row.employed_total)}}`
           ].join("\\n"),
           color: (row.net || 0) >= 0 ? "#dcfce7" : "#fee2e2"
         }},

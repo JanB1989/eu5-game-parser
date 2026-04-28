@@ -139,6 +139,11 @@ building_manager={
             location=1
             owner=1
             last_months_profit=3
+            masonry_rework={
+                missing={
+                    demand=masonry_rework
+                }
+            }
             stone_bricks={
                 missing={
                     demand=stone_bricks

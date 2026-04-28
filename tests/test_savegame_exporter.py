@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from eu5gameparser.cli import app
+from eu5gameparser.domain.buildings import BuildingData
 from eu5gameparser.domain.eu5 import load_eu5_data
 from eu5gameparser.savegame import (
     is_text_save,
@@ -16,6 +17,7 @@ from eu5gameparser.savegame import (
     write_savegame_explorer_html,
     write_savegame_parquet,
 )
+from eu5gameparser.savegame.exporter import _population_flow_table
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
 SAVE_FIXTURE = Path(__file__).parent / "fixtures" / "savegames" / "minimal_text_save.eu5"
@@ -53,12 +55,13 @@ def test_load_savegame_tables_from_text_fixture(tmp_path: Path) -> None:
     assert tables.market_good_bucket_flows.height == 11
     assert tables.locations.height == 3
     assert tables.buildings.height == 1
-    assert tables.building_methods.height == 1
+    assert tables.building_methods.height == 2
     assert tables.rgo_flows.height == 2
+    assert tables.production_method_population_flows.height == 4
     building = tables.buildings.row(0, named=True)
     assert building["building_type"] == "mason"
     assert building["market_id"] == 1
-    assert building["active_method_ids"] == ["stone_bricks"]
+    assert building["active_method_ids"] == ["masonry_rework", "stone_bricks"]
 
     masonry = tables.market_goods.filter(pl.col("good_id") == "masonry").row(0, named=True)
     assert masonry["default_price"] == 8.0
@@ -80,14 +83,24 @@ def test_production_method_flows_reconcile_to_save_buckets(tmp_path: Path) -> No
     assert checks.select(pl.col("delta").abs().max()).item() < 1e-6
 
     masonry_output = tables.production_method_good_flows.filter(
-        (pl.col("good_id") == "masonry") & (pl.col("direction") == "output")
+        (pl.col("good_id") == "masonry")
+        & (pl.col("direction") == "output")
+        & (pl.col("production_method") == "stone_bricks")
     ).row(0, named=True)
     assert masonry_output["production_method"] == "stone_bricks"
     assert masonry_output["nominal_amount"] == 1.0
-    assert masonry_output["allocated_amount"] == 10.0
-    assert masonry_output["allocation_factor"] == 10.0
+    assert masonry_output["allocated_amount"] == pytest.approx(6.25)
+    assert masonry_output["allocation_factor"] == pytest.approx(6.25)
     assert masonry_output["building_count"] == 1
     assert masonry_output["level_sum"] == 2.0
+
+    masonry_rework_output = tables.production_method_good_flows.filter(
+        (pl.col("good_id") == "masonry")
+        & (pl.col("direction") == "output")
+        & (pl.col("production_method") == "masonry_rework")
+    ).row(0, named=True)
+    assert masonry_rework_output["nominal_amount"] == 0.6
+    assert masonry_rework_output["allocated_amount"] == pytest.approx(3.75)
 
     stone_input = tables.production_method_good_flows.filter(
         (pl.col("good_id") == "stone") & (pl.col("direction") == "input")
@@ -106,6 +119,110 @@ def test_production_method_flows_reconcile_to_save_buckets(tmp_path: Path) -> No
     assert clay_rgos.select(pl.col("allocated_amount").sum()).item() == 6.0
 
 
+def test_population_flows_split_building_employment_by_method_value(tmp_path: Path) -> None:
+    data = _fixture_eu5_data(tmp_path)
+
+    tables = load_savegame_tables(save_path=SAVE_FIXTURE, eu5_data=data)
+
+    population = tables.production_method_population_flows
+    building_population = population.filter(pl.col("source_kind") == "building")
+    assert building_population.select(pl.col("employed_total").sum()).item() == pytest.approx(2.0)
+
+    stone_bricks = building_population.filter(
+        pl.col("production_method") == "stone_bricks"
+    ).row(0, named=True)
+    masonry_rework = building_population.filter(
+        pl.col("production_method") == "masonry_rework"
+    ).row(0, named=True)
+
+    assert stone_bricks["good_id"] == "masonry"
+    assert stone_bricks["allocation_basis"] == "output_value"
+    assert stone_bricks["employment_share"] == pytest.approx(0.625)
+    assert stone_bricks["employed_total"] == pytest.approx(1.25)
+    assert stone_bricks["employed_laborers"] == pytest.approx(1.25)
+    assert stone_bricks["employed_nobles"] == 0.0
+
+    assert masonry_rework["employment_share"] == pytest.approx(0.375)
+    assert masonry_rework["employed_total"] == pytest.approx(0.75)
+    assert masonry_rework["employed_laborers"] == pytest.approx(0.75)
+
+    rgo_population = population.filter(pl.col("source_kind") == "rgo")
+    assert rgo_population.select(pl.col("employed_total").sum()).item() == pytest.approx(2.0)
+    assert rgo_population.select(pl.col("employed_laborers").sum()).item() == pytest.approx(2.0)
+
+
+def test_population_flow_value_split_uses_one_third_two_thirds() -> None:
+    building_data = BuildingData(
+        categories=pl.DataFrame(),
+        buildings=pl.DataFrame(
+            [{"name": "test_workshop", "pop_type": "laborers"}],
+            schema={"name": pl.String, "pop_type": pl.String},
+        ),
+        production_methods=pl.DataFrame(
+            [
+                {"name": "low_value", "produced": "widgets", "output": 1.0},
+                {"name": "high_value", "produced": "widgets", "output": 2.0},
+            ],
+            schema={"name": pl.String, "produced": pl.String, "output": pl.Float64},
+        ),
+        goods_flow_nodes=pl.DataFrame(),
+        goods_flow_edges=pl.DataFrame(),
+        unresolved_production_methods=pl.DataFrame(),
+        duplicate_production_methods=pl.DataFrame(),
+    )
+    buildings = pl.DataFrame(
+        [
+            {
+                "building_id": 1,
+                "building_type": "test_workshop",
+                "location_id": 10,
+                "location_slug": "test_location",
+                "market_id": 7,
+                "level": 1.0,
+                "employed": 1.0,
+            }
+        ]
+    )
+    building_methods = pl.DataFrame(
+        [
+            {
+                "building_id": 1,
+                "building_type": "test_workshop",
+                "location_id": 10,
+                "location_slug": "test_location",
+                "market_id": 7,
+                "production_method": "low_value",
+            },
+            {
+                "building_id": 1,
+                "building_type": "test_workshop",
+                "location_id": 10,
+                "location_slug": "test_location",
+                "market_id": 7,
+                "production_method": "high_value",
+            },
+        ]
+    )
+    market_goods = pl.DataFrame(
+        [{"market_id": 7, "good_id": "widgets", "price": 3.0, "default_price": 1.0}]
+    )
+
+    population = _population_flow_table(
+        building_data,
+        pl.DataFrame(),
+        buildings,
+        building_methods,
+        market_goods,
+    )
+
+    low = population.filter(pl.col("production_method") == "low_value").row(0, named=True)
+    high = population.filter(pl.col("production_method") == "high_value").row(0, named=True)
+    assert low["employment_share"] == pytest.approx(1.0 / 3.0)
+    assert high["employment_share"] == pytest.approx(2.0 / 3.0)
+    assert low["employed_laborers"] == pytest.approx(1.0 / 3.0)
+    assert high["employed_laborers"] == pytest.approx(2.0 / 3.0)
+
+
 def test_write_savegame_parquet_writes_all_tables(tmp_path: Path) -> None:
     data = _fixture_eu5_data(tmp_path)
     output = tmp_path / "savegame"
@@ -122,6 +239,7 @@ def test_write_savegame_parquet_writes_all_tables(tmp_path: Path) -> None:
         "building_methods",
         "rgo_flows",
         "production_method_good_flows",
+        "production_method_population_flows",
         "accounting_checks",
     }
     assert {path.stem for path in output.glob("*.parquet")} == expected
@@ -150,6 +268,9 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     payload = _embedded_payload(html)
     assert "bucketFlows" in payload
     assert "rgoFlows" in payload
+    assert "employed_laborers" in payload["goods"][0]
+    assert any(row.get("employed_laborers", 0) > 0 for row in payload["marketGoods"])
+    assert any(row.get("employed_total", 0) > 0 for row in payload["flows"])
     assert _graph_supply(payload, "masonry") == 11.0
     assert _graph_demand(payload, "masonry") == 3.0
     assert any(row.get("building_count") == 1 for row in payload["flows"])
@@ -160,6 +281,7 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert clay_rgos[0]["allocated_amount"] == 6.0
     assert clay_rgos[0]["location_count"] == 2
     assert clay_rgos[0]["rgo_employed"] == 2.0
+    assert clay_rgos[0]["employed_laborers"] == 2.0
     assert clay_rgos[0]["max_raw_material_workers"] == 2.0
 
 
@@ -188,6 +310,7 @@ def test_savegame_cli_writes_parquet_tables(tmp_path: Path) -> None:
     assert (output / "savegame_explorer.html").exists()
     assert (output / "market_good_bucket_flows.parquet").exists()
     assert (output / "rgo_flows.parquet").exists()
+    assert (output / "production_method_population_flows.parquet").exists()
     assert pl.read_parquet(output / "accounting_checks.parquet")["status"].to_list() == ["ok"] * 3
 
 
@@ -277,6 +400,7 @@ def _rgo_graph_rows(payload: dict, good: str, market_id: int | None = None) -> l
                 "allocated_amount": 0.0,
                 "nominal_amount": 0.0,
                 "rgo_employed": 0.0,
+                "employed_laborers": 0.0,
                 "max_raw_material_workers": 0.0,
                 "location_count": 0,
             },
@@ -284,6 +408,7 @@ def _rgo_graph_rows(payload: dict, good: str, market_id: int | None = None) -> l
         current["allocated_amount"] += row.get("allocated_amount") or 0.0
         current["nominal_amount"] += row.get("nominal_amount") or 0.0
         current["rgo_employed"] += row.get("rgo_employed") or 0.0
+        current["employed_laborers"] += row.get("employed_laborers") or 0.0
         current["max_raw_material_workers"] += row.get("max_raw_material_workers") or 0.0
         current["location_count"] += 1
     return sorted(grouped.values(), key=lambda item: abs(item["allocated_amount"]), reverse=True)
