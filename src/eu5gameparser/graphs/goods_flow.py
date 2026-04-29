@@ -610,13 +610,14 @@ def _explorer_goods(
         source = _good_source(goods_sources, good)
         summary = summary_by_name.get(good, {})
         details = good_details_by_name.get(good, {})
+        good_type = summary.get("category")
         goods.append(
             {
                 "name": good,
-                "designation": details.get("method"),
+                "designation": _html_goods_designation(details.get("method"), good_type),
                 "price": summary.get("default_market_price"),
                 "food": summary.get("food"),
-                "type": summary.get("category"),
+                "type": good_type,
                 "transport_cost": summary.get("transport_cost"),
                 "pm_output": summary.get("output_method_count", output_counts.get(good, 0)),
                 "pm_input": summary.get("input_method_count", input_counts.get(good, 0)),
@@ -633,6 +634,12 @@ def _explorer_goods(
             }
         )
     return goods
+
+
+def _html_goods_designation(designation: Any, good_type: Any) -> Any:
+    if (designation is None or designation == "") and good_type == "produced":
+        return "produced"
+    return designation
 
 
 def _advancement_output_modifiers(advancements: Any | None) -> list[dict[str, Any]]:
@@ -2489,7 +2496,10 @@ def _explorer_html(
         columns.get(column).push(node);
       }});
       const positions = {{}};
-      for (const [column, nodes] of [...columns.entries()].sort((left, right) => left[0] - right[0])) {{
+      const orderedColumns = [...columns.entries()].sort(
+        (left, right) => left[0] - right[0]
+      );
+      for (const [column, nodes] of orderedColumns) {{
         nodes.sort((left, right) => {{
           const leftLabel = left.data("label") || left.id();
           const rightLabel = right.data("label") || right.id();

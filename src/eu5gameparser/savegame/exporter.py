@@ -295,6 +295,7 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         root.get("market_manager"),
         location_slug,
         _default_prices(eu5_data),
+        _goods_metadata(eu5_data),
     )
     market_food = _market_food_table(markets)
     buildings, building_methods = _building_tables(
@@ -407,6 +408,7 @@ def _market_tables(
     market_manager: Any,
     location_slug: dict[int, str],
     default_prices: dict[str, float],
+    goods_metadata: dict[str, dict[str, str | None]],
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     root = _as_block(market_manager)
     database = _as_block(_first(root, "database"))
@@ -453,6 +455,8 @@ def _market_tables(
                     "market_id": market_id,
                     "market_center_slug": location_slug.get(center or -1),
                     "good_id": good_id,
+                    "goods_category": goods_metadata.get(good_id, {}).get("category"),
+                    "goods_designation": goods_metadata.get(good_id, {}).get("designation"),
                     "price": _to_float(_first(good_data, "price")),
                     "default_price": default_prices.get(good_id),
                     "supply": supply,
@@ -1310,6 +1314,16 @@ def _default_prices(eu5_data: Eu5Data) -> dict[str, float]:
     }
 
 
+def _goods_metadata(eu5_data: Eu5Data) -> dict[str, dict[str, str | None]]:
+    return {
+        row["name"]: {
+            "category": row.get("category"),
+            "designation": row.get("method"),
+        }
+        for row in eu5_data.goods.to_dicts()
+    }
+
+
 def _location_market_map(locations: pl.DataFrame) -> dict[int, int]:
     if locations.is_empty():
         return {}
@@ -1473,6 +1487,8 @@ def _market_goods_schema(category_columns: list[str]) -> dict[str, Any]:
         "market_id": pl.Int64,
         "market_center_slug": pl.String,
         "good_id": pl.String,
+        "goods_category": pl.String,
+        "goods_designation": pl.String,
         "price": pl.Float64,
         "default_price": pl.Float64,
         "supply": pl.Float64,

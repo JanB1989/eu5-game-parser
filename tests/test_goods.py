@@ -19,6 +19,13 @@ def test_load_goods_from_synthetic_fixture() -> None:
         "masonry",
         "gems",
         "porcelain",
+        "tools",
+        "lumber",
+        "infrastructure",
+        "prestige",
+        "early_goods",
+        "late_goods",
+        "regional_goods",
     ]
 
     cotton = data.goods.filter(data.goods["name"] == "cotton").row(0, named=True)
@@ -71,3 +78,21 @@ def test_build_goods_summary_counts_inputs_outputs_and_provenance() -> None:
     porcelain = summary.filter(summary["name"] == "porcelain").row(0, named=True)
     assert porcelain["input_method_count"] == 0
     assert porcelain["output_method_count"] == 0
+
+
+def test_parsed_goods_have_categories_and_cover_production_method_references() -> None:
+    goods_data = load_goods_data(ParserConfig(game_root=FIXTURE_ROOT))
+    building_data = load_building_data(ParserConfig(game_root=FIXTURE_ROOT))
+
+    goods_by_name = {row["name"]: row for row in goods_data.goods.to_dicts()}
+    missing_categories = [
+        name for name, row in goods_by_name.items() if row.get("category") is None
+    ]
+    referenced_goods: set[str] = set()
+    for method in building_data.production_methods.to_dicts():
+        if method.get("produced"):
+            referenced_goods.add(method["produced"])
+        referenced_goods.update(method.get("input_goods") or [])
+
+    assert missing_categories == []
+    assert referenced_goods - goods_by_name.keys() == set()

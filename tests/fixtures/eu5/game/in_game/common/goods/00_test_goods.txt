@@ -52,3 +52,31 @@ porcelain = {
         all = 1.1
     }
 }
+
+tools = {
+    category = produced
+}
+
+lumber = {
+    category = produced
+}
+
+infrastructure = {
+    category = produced
+}
+
+prestige = {
+    category = produced
+}
+
+early_goods = {
+    category = produced
+}
+
+late_goods = {
+    category = produced
+}
+
+regional_goods = {
+    category = produced
+}

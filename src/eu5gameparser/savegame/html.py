@@ -71,6 +71,8 @@ def _goods_rows(market_goods: pl.DataFrame, population_flows: pl.DataFrame) -> l
         market_goods.group_by("good_id")
         .agg(
             [
+                _first_optional_column(market_goods, "goods_designation", "designation"),
+                _first_optional_column(market_goods, "goods_category", "type"),
                 pl.col("supply").fill_null(0).sum().alias("supply"),
                 pl.col("demand").fill_null(0).sum().alias("demand"),
                 pl.col("net").fill_null(0).sum().alias("net"),
@@ -82,7 +84,10 @@ def _goods_rows(market_goods: pl.DataFrame, population_flows: pl.DataFrame) -> l
         .sort("good_id")
         .to_dicts()
     )
-    return [_merge_population(row, (row["good_id"],), population_by_good) for row in rows]
+    return [
+        _merge_population(_normalize_goods_designation(row), (row["good_id"],), population_by_good)
+        for row in rows
+    ]
 
 
 def _selected_market_goods_rows(
@@ -95,6 +100,8 @@ def _selected_market_goods_rows(
         "market_id",
         "market_center_slug",
         "good_id",
+        "goods_designation",
+        "goods_category",
         "price",
         "default_price",
         "supply",
@@ -106,10 +113,26 @@ def _selected_market_goods_rows(
     ]
     selected = [column for column in columns if column in market_goods.columns]
     rows = market_goods.select(selected).sort(["market_id", "good_id"]).to_dicts()
+    for row in rows:
+        row["designation"] = row.pop("goods_designation", None)
+        row["type"] = row.pop("goods_category", None)
+        _normalize_goods_designation(row)
     return [
         _merge_population(row, (row["market_id"], row["good_id"]), population_by_market_good)
         for row in rows
     ]
+
+
+def _first_optional_column(table: pl.DataFrame, column: str, alias: str) -> pl.Expr:
+    if column not in table.columns:
+        return pl.lit(None, dtype=pl.String).alias(alias)
+    return pl.col(column).drop_nulls().first().alias(alias)
+
+
+def _normalize_goods_designation(row: dict[str, Any]) -> dict[str, Any]:
+    if not row.get("designation") and row.get("type") == "produced":
+        row["designation"] = "produced"
+    return row
 
 
 def _flow_rows(flows: pl.DataFrame, population_flows: pl.DataFrame) -> list[dict[str, Any]]:
@@ -383,6 +406,35 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       gap: 8px;
       padding: 8px;
     }}
+    .designation-labour-summary {{
+      align-items: stretch;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }}
+    .designation-labour-item {{
+      background: #f8fafc;
+      border: 1px solid #dce5ef;
+      border-radius: 6px;
+      flex: 0 0 auto;
+      min-width: 150px;
+      padding: 8px;
+    }}
+    .designation-labour-name {{
+      color: #172033;
+      font-size: 12px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .designation-labour-detail {{
+      color: #5b677a;
+      font-size: 11px;
+      margin-top: 3px;
+      white-space: nowrap;
+    }}
     .pool-totals {{
       display: grid;
       gap: 8px;
@@ -541,6 +593,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           <div class="food-summary hidden" id="foodSummary"></div>
           <div class="meta" id="scopeLabel"></div>
           <div class="labour-pool" id="labourPool"></div>
+          <div class="designation-labour-summary" id="designationLabourSummary"></div>
         </div>
         <div class="table-wrap">
           <table>
@@ -579,6 +632,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     ];
     const overviewColumns = [
       {{ key: "good_id", label: "Good", numeric: false }},
+      {{ key: "designation", label: "Designation", numeric: false }},
+      {{ key: "type", label: "Type", numeric: false }},
       {{ key: "supply", label: "Supply", numeric: true }},
       {{ key: "demand", label: "Demand", numeric: true }},
       {{ key: "net", label: "Net", numeric: true }},
@@ -701,6 +756,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     function setNumericCell(element, value) {{
       element.textContent = formatOverviewNumber(value);
       element.title = exactNumberTitle(value);
+    }}
+    function compactText(value) {{
+      if (value === null || value === undefined || value === "") return "n/a";
+      return String(value);
     }}
     function formatFoodNumber(value) {{
       if (value === null || value === undefined || value === "") return "n/a";
@@ -908,12 +967,14 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       const footer = document.getElementById("goodsFooterRow");
       footer.replaceChildren();
       const totals = overviewTotals(rows);
+      let textColumnIndex = 0;
       for (const column of overviewColumns) {{
         if (!column.numeric) {{
           const th = document.createElement("th");
-          th.textContent = "Total";
-          th.title = "Visible overview total";
+          th.textContent = textColumnIndex === 0 ? "Total" : "";
+          th.title = textColumnIndex === 0 ? "Visible overview total" : "";
           footer.append(th);
+          textColumnIndex += 1;
           continue;
         }}
         const td = document.createElement("td");
@@ -981,6 +1042,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       const rows = marketGoods.filter(row => row.market_id === selectedMarketId);
       return rows.map(row => ({{
         good_id: row.good_id,
+        designation: row.designation,
+        type: row.type,
         supply: row.supply || 0,
         demand: row.demand || 0,
         net: row.net || 0,
@@ -1022,6 +1085,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       body.replaceChildren();
       const rows = sortedOverviewRows();
       renderTableFooter(rows);
+      renderDesignationLabourSummary(rowsForScope());
       for (const row of rows) {{
         const tr = document.createElement("tr");
         if (row.good_id === selectedGood) tr.className = "selected";
@@ -1036,8 +1100,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
           if (column.numeric) {{
             setNumericCell(td, row[column.key]);
           }} else {{
-            td.textContent = row[column.key];
-            td.title = row[column.key] || "";
+            td.textContent = compactText(row[column.key]);
+            td.title = td.textContent;
           }}
           tr.append(td);
         }}
@@ -1076,6 +1140,10 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     function updateMetrics() {{
       document.getElementById("goodsMetrics").classList.toggle("hidden", currentView === "food");
       document.getElementById("labourPool").classList.toggle("hidden", currentView === "food");
+      document.getElementById("designationLabourSummary").classList.toggle(
+        "hidden",
+        currentView !== "overview"
+      );
       document.getElementById("foodSummary").classList.toggle("hidden", currentView !== "food");
       if (currentView === "food") {{
         renderFoodSummary();
@@ -1151,6 +1219,46 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         ? `Unemployed by pop: ${{lines.join(" | ")}}`
         : "Unemployed by pop: none";
       container.append(totals, breakdown);
+    }}
+    function designationLabourRows(rows) {{
+      const groups = new Map();
+      for (const row of rows) {{
+        const designation = compactText(row.designation);
+        const current = groups.get(designation) || {{
+          designation,
+          goods: 0,
+          employed_total: 0,
+          ...emptyPopulationFields()
+        }};
+        current.goods += 1;
+        addPopulationFields(current, row);
+        groups.set(designation, current);
+      }}
+      return [...groups.values()].sort((left, right) => {{
+        const labourDelta = Number(right.employed_total || 0) - Number(left.employed_total || 0);
+        if (Math.abs(labourDelta) > 0.000001) return labourDelta;
+        return left.designation.localeCompare(right.designation);
+      }});
+    }}
+    function renderDesignationLabourSummary(rows) {{
+      const container = document.getElementById("designationLabourSummary");
+      container.replaceChildren();
+      for (const row of designationLabourRows(rows)) {{
+        const item = document.createElement("div");
+        item.className = "designation-labour-item";
+        const name = document.createElement("div");
+        name.className = "designation-labour-name";
+        name.textContent = row.designation;
+        const detail = document.createElement("div");
+        detail.className = "designation-labour-detail";
+        const goodsCount = formatOverviewNumber(row.goods);
+        const labourCount = formatOverviewNumber(row.employed_total);
+        detail.textContent = `${{goodsCount}} goods | ${{labourCount}} labour`;
+        const lines = populationDetailLines(row);
+        item.title = lines.length ? lines.join(" | ") : "No employed population";
+        item.append(name, detail);
+        container.append(item);
+      }}
     }}
     function inScope(row) {{
       return row.good_id === selectedGood

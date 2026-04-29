@@ -459,14 +459,14 @@ def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -
     masonry = _network_good(network, "masonry")
     assert masonry["price"] == 8.0
     assert masonry["food"] is None
-    assert masonry["designation"] is None
+    assert masonry["designation"] == "produced"
     assert masonry["type"] == "produced"
     assert masonry["pm_output"] == 4
     assert masonry["pm_input"] == 2
 
     designation_counts = _designation_counts(network)
     assert designation_counts["farming"] == 1
-    assert designation_counts["n/a"] == 12
+    assert designation_counts["produced"] == 12
 
 
 def test_goods_flow_explorer_can_preselect_building(tmp_path: Path) -> None:

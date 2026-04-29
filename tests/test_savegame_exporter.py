@@ -110,6 +110,8 @@ def test_load_savegame_tables_from_text_fixture(tmp_path: Path) -> None:
     assert global_pool["unemployed_total"] == pytest.approx(market_pool["unemployed_total"])
 
     masonry = tables.market_goods.filter(pl.col("good_id") == "masonry").row(0, named=True)
+    assert masonry["goods_category"] == "produced"
+    assert masonry["goods_designation"] is None
     assert masonry["default_price"] == 8.0
     assert masonry["net"] == 8.0
     assert masonry["supplied_Production"] == 10.0
@@ -339,6 +341,12 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "function renderTableFooter" in html
     assert "function renderLabourPool" in html
     assert "function selectedPopulationPool" in html
+    assert "function renderDesignationLabourSummary" in html
+    assert "function designationLabourRows" in html
+    assert 'id="designationLabourSummary"' in html
+    assert "designation-labour-summary" in html
+    assert '{ key: "designation", label: "Designation", numeric: false }' in html
+    assert '{ key: "type", label: "Type", numeric: false }' in html
     assert "sort-header" in html
     assert "sort-indicator" in html
     assert "location_count" in html
@@ -349,6 +357,16 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "populationPools" in payload
     assert "employed_laborers" in payload["goods"][0]
     assert "unemployed_total" not in payload["goods"][0]
+    masonry_good = next(row for row in payload["goods"] if row["good_id"] == "masonry")
+    assert masonry_good["type"] == "produced"
+    assert masonry_good["designation"] == "produced"
+    assert any(row["type"] == "produced" for row in payload["marketGoods"])
+    assert all(
+        row["designation"] == "produced"
+        for row in payload["marketGoods"]
+        if row["type"] == "produced"
+    )
+    assert all("designation" in row for row in payload["marketGoods"])
     assert payload["foodMarkets"][0]["food_balance"] == -2.0
     assert payload["foodMarkets"][0]["food_fill_percent"] == pytest.approx(
         100.0 / 120.0 * 100.0
@@ -363,6 +381,9 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert any(row.get("building_count") == 1 for row in payload["flows"])
     assert any(row.get("location_slug") == "norrtalje" for row in payload["rgoFlows"])
     assert any(row.get("location_slug") == "uppsala" for row in payload["rgoFlows"])
+    designation_summary = _designation_labour_summary(payload["goods"])
+    assert designation_summary["produced"]["goods"] == 3
+    assert designation_summary["produced"]["employed_total"] == pytest.approx(4.0)
     clay_rgos = _rgo_graph_rows(payload, "clay")
     assert len(clay_rgos) == 1
     assert clay_rgos[0]["allocated_amount"] == 6.0
@@ -501,3 +522,13 @@ def _rgo_graph_rows(payload: dict, good: str, market_id: int | None = None) -> l
         current["max_raw_material_workers"] += row.get("max_raw_material_workers") or 0.0
         current["location_count"] += 1
     return sorted(grouped.values(), key=lambda item: abs(item["allocated_amount"]), reverse=True)
+
+
+def _designation_labour_summary(rows: list[dict]) -> dict[str, dict[str, float]]:
+    summary: dict[str, dict[str, float]] = {}
+    for row in rows:
+        designation = row.get("designation") or "n/a"
+        current = summary.setdefault(designation, {"goods": 0, "employed_total": 0.0})
+        current["goods"] += 1
+        current["employed_total"] += row.get("employed_total") or 0.0
+    return summary
