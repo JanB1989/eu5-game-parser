@@ -80,3 +80,7 @@ late_goods = {
 regional_goods = {
     category = produced
 }
+
+tool_fixture = {
+    category = produced
+}

@@ -1,5 +1,9 @@
 from eu5gameparser.clausewitz.parser import parse_text
-from eu5gameparser.clausewitz.serializer import normalized_document, normalized_text, render_document
+from eu5gameparser.clausewitz.serializer import (
+    normalized_document,
+    normalized_text,
+    render_document,
+)
 
 
 def test_render_document_round_trips_semantic_structure() -> None:

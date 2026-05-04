@@ -26,6 +26,7 @@ def test_load_goods_from_synthetic_fixture() -> None:
         "early_goods",
         "late_goods",
         "regional_goods",
+        "tool_fixture",
     ]
 
     cotton = data.goods.filter(data.goods["name"] == "cotton").row(0, named=True)

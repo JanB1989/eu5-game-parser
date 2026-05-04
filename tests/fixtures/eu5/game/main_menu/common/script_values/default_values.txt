@@ -1,0 +1,4 @@
+test_scripted_building_price = 125
+build_price_age_of_tradition = 50
+build_price_age_of_renaissance = 100
+build_price_age_of_discovery = 200

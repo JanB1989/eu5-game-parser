@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from eu5gameparser.config import ParserConfig
+from eu5gameparser.domain.advancements import load_advancement_data
+from eu5gameparser.domain.availability import annotate_building_data_availability
 from eu5gameparser.domain.buildings import load_building_data
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
@@ -20,6 +22,11 @@ def test_load_building_tables_from_synthetic_fixture() -> None:
         "bridge_infrastructure",
         "late_workshop",
         "early_workshop",
+        "tool_guild",
+        "tool_workshop",
+        "tool_foundry",
+        "tool_mill",
+        "tool_market",
         "regional_workshop",
     }
     assert set(data.production_methods["name"].to_list()) == {
@@ -35,12 +42,24 @@ def test_load_building_tables_from_synthetic_fixture() -> None:
         "default_late_building_method",
         "early_method_late_building",
         "late_method_early_building",
+        "tool_guild_method",
+        "tool_workshop_method",
+        "tool_foundry_method",
+        "tool_mill_method",
+        "tool_market_method",
         "regional_default_method",
         "rgo_cotton",
     }
 
     mason = data.buildings.filter(data.buildings["name"] == "mason").row(0, named=True)
     assert mason["employment_size"] == 2.0
+    assert mason["icon"] == "mason"
+    assert mason["price"] == "mason_price"
+    assert mason["price_gold"] == 100.0
+    assert mason["price_source"].endswith("00_prices.txt")
+    assert mason["effective_price"] == "mason_price"
+    assert mason["effective_price_gold"] == 100.0
+    assert mason["price_kind"] == "explicit"
     assert mason["unique_production_methods"] == [
         "stone_bricks",
         "clay_bricks",
@@ -53,6 +72,33 @@ def test_load_building_tables_from_synthetic_fixture() -> None:
         ["stone_bricks", "clay_bricks"],
         ["plain_finish", "stone_upkeep", "gem_inlay", "masonry_rework"],
     ]
+    tool_workshop = data.buildings.filter(
+        data.buildings["name"] == "tool_workshop"
+    ).row(0, named=True)
+    assert tool_workshop["obsolete_buildings"] == ["tool_guild"]
+    tool_guild = data.buildings.filter(data.buildings["name"] == "tool_guild").row(
+        0, named=True
+    )
+    assert tool_guild["price"] == "scripted_price"
+    assert tool_guild["price_gold"] == 125.0
+    assert tool_guild["effective_price"] == "scripted_price"
+    assert tool_guild["effective_price_gold"] == 125.0
+    assert tool_guild["price_kind"] == "explicit"
+    bridge = data.buildings.filter(
+        data.buildings["name"] == "bridge_infrastructure"
+    ).row(0, named=True)
+    assert bridge["price"] == "missing_price"
+    assert bridge["price_gold"] is None
+    assert bridge["price_source"] is None
+    late_workshop = data.buildings.filter(
+        data.buildings["name"] == "late_workshop"
+    ).row(0, named=True)
+    assert late_workshop["price"] == "non_gold_price"
+    assert late_workshop["price_gold"] is None
+    assert late_workshop["price_source"].endswith("00_prices.txt")
+    assert late_workshop["effective_price"] == "non_gold_price"
+    assert late_workshop["effective_price_gold"] is None
+    assert late_workshop["price_kind"] == "explicit"
 
     stone_bricks = data.production_methods.filter(
         data.production_methods["name"] == "stone_bricks"
@@ -139,6 +185,27 @@ def test_load_building_tables_from_synthetic_fixture() -> None:
     assert rgo_cotton["source_layer"] == "vanilla"
     assert rgo_cotton["source_mod"] is None
     assert rgo_cotton["source_mode"] == "CREATE"
+
+
+def test_building_prices_fall_back_to_baseline_age_price() -> None:
+    config = ParserConfig(game_root=FIXTURE_ROOT)
+    data = load_building_data(config)
+    advancements = load_advancement_data(config).advancements
+
+    annotated = annotate_building_data_availability(data, advancements)
+    buildings = {row["name"]: row for row in annotated.buildings.to_dicts()}
+
+    early_workshop = buildings["early_workshop"]
+    assert early_workshop["price"] is None
+    assert early_workshop["unlock_age"] == "age_3_discovery"
+    assert early_workshop["effective_price"] == "p_building_age_3_discovery"
+    assert early_workshop["effective_price_gold"] == 200.0
+    assert early_workshop["price_kind"] == "baseline_age"
+
+    mason = buildings["mason"]
+    assert mason["effective_price"] == "mason_price"
+    assert mason["effective_price_gold"] == 100.0
+    assert mason["price_kind"] == "explicit"
 
 
 def test_reports_unresolved_production_method_references() -> None:

@@ -99,6 +99,7 @@ def annotate_building_data_availability(
         "unlock_building",
         include_specific_unlocks=include_specific_unlocks,
     )
+    buildings = _annotate_effective_building_prices(buildings, data.baseline_prices)
     production_methods = _annotate_availability(
         data.production_methods,
         advancements,
@@ -115,6 +116,44 @@ def annotate_building_data_availability(
         buildings=buildings,
         production_methods=production_methods,
     )
+
+
+def _annotate_effective_building_prices(
+    buildings: pl.DataFrame,
+    baseline_prices: dict[str, Any],
+) -> pl.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for row in buildings.to_dicts():
+        if row.get("price"):
+            row["effective_price"] = row["price"]
+            row["effective_price_gold"] = row.get("price_gold")
+            row["effective_price_source"] = row.get("price_source")
+            row["price_kind"] = "explicit"
+            rows.append(row)
+            continue
+
+        age = _price_age_for_building(row)
+        baseline = baseline_prices.get(age)
+        if baseline is None:
+            row["effective_price"] = None
+            row["effective_price_gold"] = None
+            row["effective_price_source"] = None
+            row["price_kind"] = "unresolved"
+        else:
+            row["effective_price"] = baseline.key
+            row["effective_price_gold"] = baseline.gold
+            row["effective_price_source"] = baseline.source
+            row["price_kind"] = "baseline_age"
+        rows.append(row)
+    return pl.DataFrame(rows, schema=dict(buildings.schema))
+
+
+def _price_age_for_building(row: dict[str, Any]) -> str:
+    for key in ("general_unlock_age", "unlock_age", "specific_unlock_age"):
+        age = row.get(key)
+        if isinstance(age, str) and age in AGE_INDEX:
+            return age
+    return AGE_ORDER[0]
 
 
 def _annotate_effective_method_availability(

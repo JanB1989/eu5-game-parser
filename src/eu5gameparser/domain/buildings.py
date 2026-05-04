@@ -29,6 +29,22 @@ PRODUCTION_METHOD_METADATA = {
     "produced",
 }
 
+BASELINE_BUILDING_PRICE_BY_AGE = {
+    "age_1_traditions": "p_building_age_1_traditions",
+    "age_2_renaissance": "p_building_age_2_renaissance",
+    "age_3_discovery": "p_building_age_3_discovery",
+    "age_4_reformation": "p_building_age_4_reformation",
+    "age_5_absolutism": "p_building_age_5_absolutism",
+    "age_6_revolutions": "p_building_age_6_revolutions",
+}
+
+
+@dataclass(frozen=True)
+class PriceInfo:
+    key: str
+    gold: float | None
+    source: str | None
+
 
 @dataclass(frozen=True)
 class GoodsInput:
@@ -64,9 +80,18 @@ class ProductionMethod:
 class Building:
     name: str
     category: str | None
+    icon: str | None
+    price: str | None
+    price_gold: float | None
+    price_source: str | None
+    effective_price: str | None
+    effective_price_gold: float | None
+    effective_price_source: str | None
+    price_kind: str
     pop_type: str | None
     employment_size: float | None
     max_levels: str | int | float | bool | None
+    obsolete_buildings: list[str]
     possible_production_methods: list[str]
     unique_production_methods: list[str]
     unique_production_method_groups: list[list[str]]
@@ -87,6 +112,7 @@ class BuildingData:
     goods_flow_edges: pl.DataFrame
     unresolved_production_methods: pl.DataFrame
     duplicate_production_methods: pl.DataFrame
+    baseline_prices: dict[str, PriceInfo] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -104,10 +130,20 @@ def load_building_data(
     categories_dir = load_merged_directory(profile_config, "building_categories")
     methods_dir = load_merged_directory(profile_config, "production_methods")
     buildings_dir = load_merged_directory(profile_config, "building_types")
+    prices_dir = load_merged_directory(profile_config, "prices")
+    script_values_dir = load_merged_directory(
+        profile_config,
+        "script_values",
+        scope="main_menu",
+        include_scalars=True,
+    )
 
     categories = _load_categories(categories_dir)
     global_methods = _load_global_production_methods(methods_dir)
-    buildings, inline_methods = _load_buildings(buildings_dir)
+    script_values = _load_script_values(script_values_dir)
+    prices = _load_prices(prices_dir, script_values)
+    baseline_prices = _baseline_prices(prices)
+    buildings, inline_methods = _load_buildings(buildings_dir, prices)
     generated_methods = _generate_rgo_methods(goods_data)
 
     all_methods = [*global_methods, *inline_methods, *generated_methods]
@@ -129,6 +165,8 @@ def load_building_data(
     warnings.extend(categories_dir.warnings)
     warnings.extend(methods_dir.warnings)
     warnings.extend(buildings_dir.warnings)
+    warnings.extend(prices_dir.warnings)
+    warnings.extend(script_values_dir.warnings)
 
     categories_df = pl.DataFrame(
         [_category_row(entry) for entry in categories],
@@ -168,6 +206,7 @@ def load_building_data(
         goods_flow_edges=edges,
         unresolved_production_methods=unresolved_df,
         duplicate_production_methods=duplicate_df,
+        baseline_prices=baseline_prices,
         warnings=warnings,
     )
 
@@ -313,12 +352,49 @@ def _load_global_production_methods(directory: MergedDirectory) -> list[Producti
     ]
 
 
-def _load_buildings(directory: MergedDirectory) -> tuple[list[Building], list[ProductionMethod]]:
+def _load_script_values(directory: MergedDirectory) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for entry in directory.entries:
+        value = _scalar_float(entry.value)
+        if value is not None:
+            values[entry.key] = value
+    return values
+
+
+def _load_prices(
+    directory: MergedDirectory, script_values: dict[str, float]
+) -> dict[str, PriceInfo]:
+    prices: dict[str, PriceInfo] = {}
+    for entry in directory.entries:
+        gold: float | None = None
+        if isinstance(entry.value, CList):
+            gold_value = _last(entry.value, "gold")
+            gold = _scalar_float(gold_value)
+            if gold is None:
+                script_value_key = _scalar_string(gold_value)
+                if script_value_key is not None:
+                    gold = script_values.get(script_value_key)
+        prices[entry.key] = PriceInfo(entry.key, gold, entry.source_file)
+    return prices
+
+
+def _baseline_prices(prices: dict[str, PriceInfo]) -> dict[str, PriceInfo]:
+    return {
+        age: prices[price_key]
+        for age, price_key in BASELINE_BUILDING_PRICE_BY_AGE.items()
+        if price_key in prices
+    }
+
+
+def _load_buildings(
+    directory: MergedDirectory,
+    prices: dict[str, PriceInfo],
+) -> tuple[list[Building], list[ProductionMethod]]:
     buildings: list[Building] = []
     inline_methods: list[ProductionMethod] = []
     for entry in directory.entries:
         method_groups = _unique_production_method_groups(entry.value)
-        buildings.append(_building_from_entry(entry, method_groups))
+        buildings.append(_building_from_entry(entry, method_groups, prices))
         for group_index, group in enumerate(method_groups):
             inline_methods.extend(
                 _production_method_from_entry(
@@ -360,15 +436,32 @@ def _generate_rgo_methods(goods_data: GoodsData) -> list[ProductionMethod]:
     return methods
 
 
-def _building_from_entry(entry: MergedEntry, method_groups: list[list[CEntry]]) -> Building:
+def _building_from_entry(
+    entry: MergedEntry,
+    method_groups: list[list[CEntry]],
+    prices: dict[str, PriceInfo],
+) -> Building:
     block = _as_block(entry.value)
     unique_methods = [method for group in method_groups for method in group]
+    price = _scalar_string(_last(block, "price"))
+    price_info = prices.get(price) if price else None
+    price_gold = None if price_info is None else price_info.gold
+    price_source = None if price_info is None else price_info.source
     return Building(
         name=entry.key,
         category=_scalar_string(_last(block, "category")),
+        icon=_scalar_string(_last(block, "icon")),
+        price=price,
+        price_gold=price_gold,
+        price_source=price_source,
+        effective_price=price,
+        effective_price_gold=price_gold,
+        effective_price_source=price_source,
+        price_kind="explicit" if price else "unresolved",
         pop_type=_scalar_string(_last(block, "pop_type")),
         employment_size=_scalar_float(_last(block, "employment_size")),
         max_levels=_scalar(_last(block, "max_levels")),
+        obsolete_buildings=_scalar_values(block, "obsolete"),
         possible_production_methods=_scalar_list(_last(block, "possible_production_methods")),
         unique_production_methods=[method.key for method in unique_methods],
         unique_production_method_groups=[
@@ -476,9 +569,18 @@ def _building_row(building: Building) -> dict[str, Any]:
     return {
         "name": building.name,
         "category": building.category,
+        "icon": building.icon,
+        "price": building.price,
+        "price_gold": building.price_gold,
+        "price_source": building.price_source,
+        "effective_price": building.effective_price,
+        "effective_price_gold": building.effective_price_gold,
+        "effective_price_source": building.effective_price_source,
+        "price_kind": building.price_kind,
         "pop_type": building.pop_type,
         "employment_size": building.employment_size,
         "max_levels": None if building.max_levels is None else str(building.max_levels),
+        "obsolete_buildings": building.obsolete_buildings,
         "possible_production_methods": building.possible_production_methods,
         "unique_production_methods": building.unique_production_methods,
         "unique_production_method_groups": building.unique_production_method_groups,
@@ -604,9 +706,18 @@ def _building_schema() -> dict[str, Any]:
     return {
         "name": pl.String,
         "category": pl.String,
+        "icon": pl.String,
+        "price": pl.String,
+        "price_gold": pl.Float64,
+        "price_source": pl.String,
+        "effective_price": pl.String,
+        "effective_price_gold": pl.Float64,
+        "effective_price_source": pl.String,
+        "price_kind": pl.String,
         "pop_type": pl.String,
         "employment_size": pl.Float64,
         "max_levels": pl.String,
+        "obsolete_buildings": pl.List(pl.String),
         "possible_production_methods": pl.List(pl.String),
         "unique_production_methods": pl.List(pl.String),
         "unique_production_method_groups": pl.List(pl.List(pl.String)),
@@ -712,6 +823,13 @@ def _scalar_list(value: Value | None) -> list[str]:
         return [str(item) for item in value.items if not isinstance(item, CList)]
     scalar = _scalar(value)
     return [] if scalar is None else [str(scalar)]
+
+
+def _scalar_values(block: CList, key: str) -> list[str]:
+    values: list[str] = []
+    for value in block.values(key):
+        values.extend(_scalar_list(value))
+    return values
 
 
 def _to_python(value: Value | None) -> Any:

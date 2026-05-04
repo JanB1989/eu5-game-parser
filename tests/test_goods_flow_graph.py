@@ -13,6 +13,7 @@ from eu5gameparser.graphs import (
     write_good_flow_html,
     write_goods_flow_explorer_html,
 )
+from eu5gameparser.graphs.goods_flow import _building_icon_source
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
 MOD_ROOT = Path(__file__).parent / "fixtures" / "eu5_mod"
@@ -307,6 +308,12 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert 'value="masonry"' in html
     assert "&quot;mason&quot;" in html
     assert "function updateEntityOptions" in html
+    assert "function enhanceSearchInput" in html
+    assert "suppressNextSelect" in html
+    assert "pickerClick" in html
+    assert 'event.key === "Enter"' in html
+    assert 'event.key === "Escape"' in html
+    assert "input.select()" in html
     assert '"selector": ".building.selected"' not in html
     assert 'id="ageFilter"' in html
     assert 'id="specificUnlocks"' in html
@@ -417,10 +424,72 @@ def test_write_goods_flow_explorer_html_creates_single_popout_explorer(tmp_path:
     assert '"profit":' in html
     assert '"profit_margin_percent":' in html
     assert '"buildings":' in html
+    assert '"price_gold":' in html
+    assert '"effective_price_gold":' in html
+    assert '"price_kind":' in html
+    assert '"pop_type":' in html
+    assert '"employment_size":' in html
+    assert '"production_method_group_index":' in html
+    assert '"slot_label":' in html
+    assert '"progressionByGood":' in html
+    assert '"icon": "mason"' in html
+    assert '"icon_source":' in html
+    assert '"icon_url":' in html
+    assert '"icon_panel_url":' in html
+    assert '"building_icon_panel_url":' in html
+    assert '"selector": ".has-building-icon"' in html
+    assert '"background-image": "data(building_icon_panel_url)"' in html
+    assert '"background-fit": "contain"' in html
+    assert '"background-width": "100%"' in html
+    assert '"background-height": "100%"' in html
+    assert '"background-position-x": "50%"' in html
+    assert '"background-position-y": "50%"' in html
+    assert '"background-image-crossorigin": "null"' in html
+    assert '"background-image-opacity": 1' in html
+    assert '"background-image-containment": "over"' in html
+    assert '"background-repeat": "no-repeat"' in html
+    assert '"background-opacity": 0.18' in html
+    assert '"width": 292' in html
+    assert '"height": 116' in html
+    assert '"text-halign": "center"' in html
+    assert '"text-valign": "center"' in html
+    assert '"text-justification": "center"' in html
+    assert '"text-max-width": "178px"' in html
+    assert '"text-margin-x": "48px"' in html
+    assert '"text-margin-y": "0px"' in html
+    assert '"text-background-color": "#ffffff"' in html
+    assert '"text-background-opacity": 0.92' in html
+    assert '"text-background-padding": "5px"' in html
+    assert '"text-background-shape": "round-rectangle"' in html
+    assert '"background-fit": "none"' not in html
+    assert '"height": 156' not in html
+    assert '"text-margin-y": "-14px"' not in html
+    assert '"text-background-shape": "roundrectangle"' not in html
+    assert "nodeDimensionsIncludeLabels: true" in html
+    assert 'id="progressionTab"' in html
+    assert 'id="progressionView"' in html
+    assert "function renderProgression" in html
+    assert "function progressionSelectedAge" in html
+    assert "progression-grid" in html
+    assert "progression-legend" in html
+    assert ".progression-swatch.building" in html
+    assert ".progression-swatch.slot" in html
+    assert "function appendProgressionMethodGroups" in html
+    assert "progression-slot-group" in html
+    assert "Cost:" in html
+    assert "Baseline age price:" in html
+    assert "overflow-wrap: anywhere" in html
+    assert "Pop:" in html
+    assert "Employment:" in html
+    assert "Specific/regional" in html
+    assert "#6366f1" in html
+    assert "progression-card" in html
+    assert '"type": "building_unlock"' in html
+    assert '"type": "method_unlock"' in html
     assert '"effective_unlock_age":' in html
     assert '"building_unlock_age":' in html
     assert "method.effective_availability_kind" in html
-    assert "method.building_general_unlock_age" in html
+    assert "event.effective_general_unlock_age" in html
     assert "stone_bricks" in html
     assert "clay_bricks" in html
     assert "masonry" in html
@@ -445,6 +514,24 @@ def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -
     assert '"name": "stone"' in html
     assert '"name": "masonry"' in html
     assert '"name": "mason"' in html
+    masonry_line = network["progressionByGood"]["masonry"][0]
+    assert masonry_line["family"] == "mason"
+    assert masonry_line["buildings"][0]["building"]["name"] == "mason"
+    assert masonry_line["buildings"][0]["building"]["icon"] == "mason"
+    assert masonry_line["buildings"][0]["building"]["price_gold"] == 100.0
+    assert masonry_line["buildings"][0]["building"]["pop_type"] == "laborers"
+    assert masonry_line["buildings"][0]["building"]["employment_size"] == 2.0
+    assert masonry_line["buildings"][0]["methods"][0]["produced"] == "masonry"
+    slot_by_method = {
+        method["name"]: method["slot_label"]
+        for method in masonry_line["buildings"][0]["methods"]
+    }
+    assert slot_by_method == {
+        "clay_bricks": "Slot 1",
+        "stone_bricks": "Slot 1",
+        "gem_inlay": "Slot 2",
+        "masonry_rework": "Slot 2",
+    }
     assert '"name": "stone_bricks"' in html
     assert '"name": "monument_work"' in html
     cotton = _network_good(network, "cotton")
@@ -466,7 +553,144 @@ def test_goods_flow_explorer_embeds_multiple_goods_and_methods(tmp_path: Path) -
 
     designation_counts = _designation_counts(network)
     assert designation_counts["farming"] == 1
-    assert designation_counts["produced"] == 12
+    assert designation_counts["produced"] == 13
+
+
+def test_progression_payload_separates_building_and_method_unlock_events(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "explorer.html",
+        eu5_data=eu5_data,
+        good="early_goods",
+        max_age="age_3_discovery",
+    )
+    network = _embedded_network(path.read_text(encoding="utf-8"))
+
+    early_line = network["progressionByGood"]["early_goods"][0]
+    early_stage = early_line["buildings"][0]
+    building_event = _progression_event(early_stage, "building_unlock")
+    method_event = _progression_event(early_stage, "method_unlock", "late_method_early_building")
+
+    assert early_stage["building"]["name"] == "early_workshop"
+    assert early_stage["building"]["effective_price"] == "p_building_age_3_discovery"
+    assert early_stage["building"]["effective_price_gold"] == 200.0
+    assert early_stage["building"]["price_kind"] == "baseline_age"
+    assert building_event["general_unlock_age"] == "age_3_discovery"
+    assert method_event["general_unlock_age"] == "age_4_reformation"
+    assert method_event["effective_general_unlock_age"] == "age_4_reformation"
+
+    late_line = network["progressionByGood"]["late_goods"][0]
+    late_stage = late_line["buildings"][0]
+    late_building_event = _progression_event(late_stage, "building_unlock")
+    late_method_event = _progression_event(
+        late_stage,
+        "method_unlock",
+        "early_method_late_building",
+    )
+
+    assert late_stage["building"]["name"] == "late_workshop"
+    assert late_stage["building"]["effective_price"] == "non_gold_price"
+    assert late_stage["building"]["price_kind"] == "explicit"
+    assert late_building_event["general_unlock_age"] == "age_4_reformation"
+    assert late_method_event["general_unlock_age"] == "age_3_discovery"
+    assert late_method_event["effective_general_unlock_age"] == "age_4_reformation"
+
+
+def test_progression_payload_groups_obsolete_upgrade_chains(tmp_path: Path) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "explorer.html",
+        eu5_data=eu5_data,
+        good="tool_fixture",
+    )
+    network = _embedded_network(path.read_text(encoding="utf-8"))
+    rows = network["progressionByGood"]["tool_fixture"]
+    rows_by_family = {row["family"]: row for row in rows}
+
+    assert [
+        stage["building"]["name"]
+        for stage in rows_by_family["tool_guild"]["buildings"]
+    ] == ["tool_guild", "tool_workshop", "tool_foundry", "tool_mill"]
+    assert rows_by_family["tool_guild"]["buildings"][1]["building"][
+        "upgrade_source"
+    ] == "obsolete"
+    assert rows_by_family["tool_guild"]["buildings"][1]["building"][
+        "upgrade_previous"
+    ] == "tool_guild"
+    assert rows_by_family["tool_guild"]["buildings"][2]["building"][
+        "upgrade_tier"
+    ] == 2
+    assert rows_by_family["tool_market"]["buildings"][0]["building"][
+        "upgrade_source"
+    ] == "none"
+
+
+def test_progression_keeps_specific_method_events_visible_as_muted(
+    tmp_path: Path,
+) -> None:
+    load_order = _load_order_file(tmp_path)
+    eu5_data = load_eu5_data(profile="merged_default", load_order_path=load_order)
+
+    path = write_goods_flow_explorer_html(
+        tmp_path / "explorer.html",
+        eu5_data=eu5_data,
+        good="masonry",
+        max_age="age_3_discovery",
+    )
+    html = path.read_text(encoding="utf-8")
+    network = _embedded_network(html)
+
+    mason_stage = network["progressionByGood"]["masonry"][0]["buildings"][0]
+    methods = {method["name"]: method for method in mason_stage["methods"]}
+
+    assert methods["gem_inlay"]["effective_availability_kind"] == "specific_only"
+    assert 'methodItem.classList.add("specific-only")' in html
+    assert "methods: (stage.methods || []).filter" not in html
+    assert "!progressionEventAllowedBySpecific(buildingEvent, includeSpecific)" not in html
+
+
+def test_building_icon_source_prefers_explicit_png(tmp_path: Path) -> None:
+    root = tmp_path / "mod"
+    icon_dir = root / "in_game" / "gfx" / "interface" / "icons" / "buildings"
+    icon_dir.mkdir(parents=True)
+    source_file = root / "in_game" / "common" / "building_types" / "buildings.txt"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("test_building = {}", encoding="utf-8")
+    explicit_icon = icon_dir / "explicit_icon.png"
+    fallback_icon = icon_dir / "test_building.png"
+    explicit_icon.write_text("png", encoding="utf-8")
+    fallback_icon.write_text("png", encoding="utf-8")
+
+    source = _building_icon_source(
+        {"name": "test_building", "icon": "explicit_icon", "source_file": str(source_file)}
+    )
+
+    assert source == explicit_icon
+
+
+def test_building_icon_source_falls_back_to_building_key_dds_from_profile_roots(
+    tmp_path: Path,
+) -> None:
+    mod_root = tmp_path / "mod"
+    vanilla_root = tmp_path / "vanilla"
+    source_file = mod_root / "in_game" / "common" / "building_types" / "pp_farming_village.txt"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("REPLACE:farming_village = {}", encoding="utf-8")
+    icon_dir = vanilla_root / "game" / "main_menu" / "gfx" / "interface" / "icons" / "buildings"
+    icon_dir.mkdir(parents=True)
+    farming_icon = icon_dir / "farming_village.dds"
+    farming_icon.write_text("dds", encoding="utf-8")
+
+    source = _building_icon_source(
+        {"name": "farming_village", "icon": None, "source_file": str(source_file)},
+        profile_roots=[vanilla_root],
+    )
+
+    assert source == farming_icon
 
 
 def test_goods_flow_explorer_can_preselect_building(tmp_path: Path) -> None:
@@ -637,6 +861,16 @@ def _network_good(network: dict, name: str) -> dict:
         if good["name"] == name:
             return good
     raise AssertionError(f"Missing network good {name}")
+
+
+def _progression_event(stage: dict, event_type: str, name: str | None = None) -> dict:
+    for event in stage["events"]:
+        if event["type"] != event_type:
+            continue
+        if name is not None and event.get("method") != name:
+            continue
+        return event
+    raise AssertionError(f"Missing progression event {event_type}:{name}")
 
 
 def _designation_counts(network: dict) -> dict[str, int]:

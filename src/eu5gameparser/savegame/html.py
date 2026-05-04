@@ -1075,6 +1075,70 @@ def _standalone_html(payload: dict[str, Any]) -> str:
         marketOptions.append(option);
       }}
     }}
+    function matchingGoodId(value) {{
+      const trimmed = value.trim();
+      if (!trimmed) return selectedGood;
+      if (goods.some(good => good.good_id === trimmed)) return trimmed;
+      const lowered = trimmed.toLowerCase();
+      const match = goods.find(good => good.good_id.toLowerCase() === lowered);
+      return match ? match.good_id : selectedGood;
+    }}
+    function matchingMarketLabel(value) {{
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.toLowerCase() === "global") return "Global";
+      const match = markets.find(market =>
+        marketLabel(market) === trimmed
+        || String(market.market_id) === trimmed
+        || (market.market_center_slug || "").toLowerCase() === trimmed.toLowerCase()
+      );
+      return match ? marketLabel(match) : marketLabel(selectedMarket());
+    }}
+    function marketIdFromLabel(value) {{
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.toLowerCase() === "global") return null;
+      const match = markets.find(market => marketLabel(market) === matchingMarketLabel(trimmed));
+      return match ? match.market_id : selectedMarketId;
+    }}
+    function enhanceSearchInput(input, normalize, commit) {{
+      let committedValue = input.value;
+      let suppressNextSelect = false;
+      const pickerClick = event => input.list && event.offsetX >= input.clientWidth - 36;
+      const selectText = () => window.requestAnimationFrame(() => input.select());
+      const commitCurrent = blurAfter => {{
+        const nextValue = normalize(input.value);
+        input.value = nextValue;
+        committedValue = nextValue;
+        commit(nextValue);
+        if (blurAfter) input.blur();
+      }};
+      input.addEventListener("pointerdown", event => {{
+        suppressNextSelect = pickerClick(event);
+      }});
+      input.addEventListener("focus", () => {{
+        committedValue = input.value;
+        if (!suppressNextSelect) selectText();
+      }});
+      input.addEventListener("click", () => {{
+        if (!suppressNextSelect) selectText();
+        suppressNextSelect = false;
+      }});
+      input.addEventListener("keydown", event => {{
+        if (event.key === "Enter") {{
+          event.preventDefault();
+          commitCurrent(true);
+        }} else if (event.key === "Escape") {{
+          event.preventDefault();
+          input.value = committedValue;
+          input.blur();
+        }}
+      }});
+      input.addEventListener("change", () => commitCurrent(false));
+      input.addEventListener("blur", () => {{
+        const nextValue = normalize(input.value);
+        input.value = nextValue;
+        committedValue = nextValue;
+      }});
+    }}
     function renderTable() {{
       if (currentView === "food") {{
         renderFoodMarketTable();
@@ -1573,22 +1637,24 @@ def _standalone_html(payload: dict[str, Any]) -> str:
       else if (currentView === "food") renderFoodGraph();
       else renderGraph();
     }}
-    document.getElementById("goodSearch").addEventListener("change", event => {{
-      if (goods.some(good => good.good_id === event.target.value)) {{
-        selectedGood = event.target.value;
+    enhanceSearchInput(
+      document.getElementById("goodSearch"),
+      value => matchingGoodId(value),
+      value => {{
+        selectedGood = matchingGoodId(value);
+        document.getElementById("goodSearch").value = selectedGood;
         render();
       }}
-    }});
-    document.getElementById("marketSearch").addEventListener("change", event => {{
-      const value = event.target.value.trim();
-      if (!value || value.toLowerCase() === "global") {{
-        selectedMarketId = null;
-      }} else {{
-        const match = markets.find(market => marketLabel(market) === value);
-        selectedMarketId = match ? match.market_id : selectedMarketId;
+    );
+    enhanceSearchInput(
+      document.getElementById("marketSearch"),
+      value => matchingMarketLabel(value),
+      value => {{
+        selectedMarketId = marketIdFromLabel(value);
+        document.getElementById("marketSearch").value = marketLabel(selectedMarket());
+        render();
       }}
-      render();
-    }});
+    );
     document.getElementById("overviewTab").addEventListener("click", () => {{
       currentView = "overview";
       render();
@@ -1603,6 +1669,7 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     }});
     fillOptions();
     document.getElementById("goodSearch").value = selectedGood;
+    document.getElementById("marketSearch").value = marketLabel(selectedMarket());
     render();
   </script>
 </body>

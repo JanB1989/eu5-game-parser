@@ -28,6 +28,17 @@ uv run eu5parse buildings
 uv run eu5parse goods-flow --format csv --output .\out
 ```
 
+Savegame progression is stored as partitioned Parquet and rendered as a static HTML dashboard:
+
+```powershell
+uv run eu5parse savegame ingest --output .\out\savegame_progression\dataset
+uv run eu5parse savegame progress --dataset .\out\savegame_progression\dataset --output .\out\savegame_progression\savegame_progression.html
+uv run eu5parse savegame benchmark --sample 10 --output .\out\savegame_progression\benchmark
+```
+
+Use `--extended` on `savegame ingest` or `savegame benchmark` to include slower legacy parity
+tables such as countries, population, provinces, estates, loans, characters, and dynasties.
+
 ## Tests
 
 ```powershell

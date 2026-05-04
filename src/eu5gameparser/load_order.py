@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from eu5gameparser.clausewitz.parser import parse_file
-from eu5gameparser.clausewitz.syntax import CEntry, CList, SourceLocation
+from eu5gameparser.clausewitz.syntax import CEntry, CList, SourceLocation, Value
 from eu5gameparser.config import DEFAULT_GAME_ROOT
 from eu5gameparser.scanner import iter_text_files
 
@@ -46,7 +47,18 @@ class GameLayer:
 
     @property
     def common_dir(self) -> Path:
+        return self.common_dir_for("in_game")
+
+    def common_dir_for(self, scope: str = "in_game") -> Path:
+        if scope not in {"in_game", "main_menu"}:
+            raise ValueError(f"Unsupported common data scope {scope!r}")
         relative = VANILLA_COMMON_RELATIVE if self.kind == "vanilla" else MOD_COMMON_RELATIVE
+        if scope == "main_menu":
+            relative = (
+                Path("game") / "main_menu" / "common"
+                if self.kind == "vanilla"
+                else Path("main_menu") / "common"
+            )
         return self.root / relative
 
 
@@ -67,7 +79,10 @@ class LoadOrderConfig:
         config_path = _resolve_load_order_path(Path(path))
         data = tomllib.loads(config_path.read_text(encoding="utf-8"))
         base_dir = config_path.resolve().parent
-        vanilla_root = _config_path(base_dir, data.get("paths", {}).get("vanilla_root", DEFAULT_GAME_ROOT))
+        vanilla_root = _config_path(
+            base_dir,
+            data.get("paths", {}).get("vanilla_root", DEFAULT_GAME_ROOT),
+        )
         mods: dict[str, GameLayer] = {}
         for mod in data.get("mods", []):
             mod_id = str(mod["id"])
@@ -107,7 +122,7 @@ class LoadOrderConfig:
 @dataclass(frozen=True)
 class MergedEntry:
     key: str
-    value: CList
+    value: Value
     location: SourceLocation
     source_layer: str
     source_mod: str | None
@@ -144,6 +159,7 @@ def load_profile(
 
 
 def _resolve_load_order_path(path: Path) -> Path:
+    path = _host_path(path)
     if path.is_absolute() or path.exists():
         return path
     for base in (Path.cwd(), *Path.cwd().parents):
@@ -158,20 +174,36 @@ def _resolve_load_order_path(path: Path) -> Path:
 
 
 def _config_path(base_dir: Path, raw: str | Path) -> Path:
-    path = Path(raw)
+    path = _host_path(Path(raw))
     if path.is_absolute():
         return path
     return base_dir / path
 
 
-def load_merged_directory(profile: DataProfile, relative_dir: str | Path) -> MergedDirectory:
+def _host_path(path: Path) -> Path:
+    path_text = str(path)
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", path_text)
+    if not match:
+        return path
+    drive = match.group(1).lower()
+    remainder = match.group(2).replace("\\", "/")
+    return Path("/mnt") / drive / remainder
+
+
+def load_merged_directory(
+    profile: DataProfile,
+    relative_dir: str | Path,
+    *,
+    scope: str = "in_game",
+    include_scalars: bool = False,
+) -> MergedDirectory:
     relative = Path(relative_dir)
     effective: dict[str, MergedEntry] = {}
     file_objects: dict[Path, set[str]] = {}
     warnings: list[str] = []
 
     for layer in profile.layers:
-        root = layer.common_dir / relative
+        root = layer.common_dir_for(scope) / relative
         files = _effective_files_for_layer(root)
         for file in files:
             relative_file = file.relative_to(root)
@@ -179,7 +211,7 @@ def load_merged_directory(profile: DataProfile, relative_dir: str | Path) -> Mer
                 effective.pop(key, None)
             file_objects[relative_file] = set()
             for parsed_entry in parse_file(file).entries:
-                if not isinstance(parsed_entry.value, CList):
+                if not include_scalars and not isinstance(parsed_entry.value, CList):
                     continue
                 mode, key = _entry_mode(parsed_entry.key)
                 source = _source_record(layer, mode, parsed_entry)

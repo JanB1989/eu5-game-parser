@@ -1,0 +1,25 @@
+europe={
+  western_europe={
+    scandinavian_region={
+      svealand_area={
+        uppland_province={ stockholm norrtalje uppsala }
+      }
+    }
+  }
+  eastern_europe={
+    alpha_region={
+      alpha_area={
+        alpha_province={ alpha }
+      }
+    }
+  }
+}
+asia={
+  east_asia={
+    beta_region={
+      beta_area={
+        beta_province={ beta }
+      }
+    }
+  }
+}

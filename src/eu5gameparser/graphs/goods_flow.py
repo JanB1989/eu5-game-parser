@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import json
 import webbrowser
@@ -18,17 +19,17 @@ from eu5gameparser.domain.availability import (
 )
 from eu5gameparser.domain.buildings import BuildingData, load_building_data
 from eu5gameparser.domain.goods import GoodsData, build_goods_summary, load_goods_data
-from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH
+from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH, LoadOrderConfig
 
 NODE_X_SPACING = 320
-NODE_Y_SPACING = 112
-GROUP_Y_SPACING = 156
+NODE_Y_SPACING = 156
+GROUP_Y_SPACING = 220
 DEFAULT_MIN_ZOOM = 0.35
 DEFAULT_MAX_ZOOM = 2.5
 DEFAULT_WHEEL_SENSITIVITY = 0.001
 DEFAULT_WIDGET_HEIGHT = "900px"
 DEFAULT_WIDGET_WIDTH = "100%"
-MIN_COLUMN_NODE_SPACING = 96
+MIN_COLUMN_NODE_SPACING = 180
 EXPLORER_METRIC_MODES = {
     "goods",
     "input_cost",
@@ -46,6 +47,8 @@ class _Method:
     input_goods: list[str]
     input_amounts: list[float]
     building: str | None
+    production_method_group: str | None = None
+    production_method_group_index: int | None = None
     source_layer: str | None = None
     source_mod: str | None = None
     source_mode: str | None = None
@@ -148,6 +151,15 @@ def write_good_flow_html(
         include_specific_unlocks=include_specific_unlocks,
         annotate_availability=True,
     )
+    icon_data = data or (None if eu5_data is None else eu5_data.building_data)
+    if icon_data is not None:
+        _attach_graph_icon_urls(
+            graph,
+            icon_data,
+            output_path,
+            profile=profile or "merged_default",
+            load_order_path=load_order_path,
+        )
     output_path.write_text(
         _standalone_html(
             good,
@@ -236,6 +248,12 @@ def write_goods_flow_explorer_html(
         include_specific_unlocks=include_specific_unlocks,
     )
     network = _explorer_network(data, goods_data, advancements)
+    _attach_building_icon_urls(
+        network,
+        output_path,
+        profile=profile,
+        load_order_path=load_order_path,
+    )
     selected = _default_explorer_selection(network, good=good, building=building)
     output_path.write_text(
         _explorer_html(
@@ -463,6 +481,8 @@ def _methods_from_data(data: BuildingData) -> list[_Method]:
                 input_goods=row["input_goods"] or [],
                 input_amounts=row["input_amounts"] or [],
                 building=row["building"],
+                production_method_group=row.get("production_method_group"),
+                production_method_group_index=row.get("production_method_group_index"),
                 source_layer=row.get("source_layer"),
                 source_mod=row.get("source_mod"),
                 source_mode=row.get("source_mode"),
@@ -510,10 +530,22 @@ def _explorer_network(
             {
                 "name": row["name"],
                 "category": row.get("category"),
+                "icon": row.get("icon"),
+                "price": row.get("price"),
+                "price_gold": row.get("price_gold"),
+                "price_source": row.get("price_source"),
+                "effective_price": row.get("effective_price"),
+                "effective_price_gold": row.get("effective_price_gold"),
+                "effective_price_source": row.get("effective_price_source"),
+                "price_kind": row.get("price_kind"),
+                "pop_type": row.get("pop_type"),
+                "employment_size": row.get("employment_size"),
+                "obsolete_buildings": row.get("obsolete_buildings") or [],
                 "production_methods": sorted(set(production_methods)),
                 "unique_production_methods": row.get("unique_production_methods") or [],
                 "possible_production_methods": row.get("possible_production_methods") or [],
                 "source_layer": row.get("source_layer"),
+                "source_file": row.get("source_file"),
                 "source_mod": row.get("source_mod"),
                 "source_mode": row.get("source_mode"),
                 "source_history": row.get("source_history"),
@@ -531,52 +563,733 @@ def _explorer_network(
             }
         )
 
+    buildings_by_name = {building["name"]: building for building in buildings}
+    _attach_upgrade_metadata(buildings_by_name)
+    method_payloads = [
+        {
+            "name": method.name,
+            "produced": method.produced,
+            "output": method.output,
+            "input_goods": method.input_goods,
+            "input_amounts": method.input_amounts,
+            "building": method.building,
+            "production_method_group": method.production_method_group,
+            "production_method_group_index": method.production_method_group_index,
+            "slot_label": _method_slot_label(method.production_method_group_index),
+            "source_layer": method.source_layer,
+            "source_mod": method.source_mod,
+            "source_mode": method.source_mode,
+            "source_history": method.source_history,
+            "provenance_state": _provenance_state(
+                method.source_layer,
+                method.source_mod,
+                method.source_mode,
+                method.source_history,
+            ),
+            "unlock_age": method.unlock_age,
+            "general_unlock_age": method.general_unlock_age,
+            "specific_unlock_age": method.specific_unlock_age,
+            "availability_kind": method.availability_kind,
+            "is_specific_only": method.is_specific_only,
+            "building_unlock_age": method.building_unlock_age,
+            "building_general_unlock_age": method.building_general_unlock_age,
+            "building_specific_unlock_age": method.building_specific_unlock_age,
+            "building_availability_kind": method.building_availability_kind,
+            "building_is_specific_only": method.building_is_specific_only,
+            "effective_unlock_age": method.effective_unlock_age,
+            "effective_general_unlock_age": method.effective_general_unlock_age,
+            "effective_specific_unlock_age": method.effective_specific_unlock_age,
+            "effective_availability_kind": method.effective_availability_kind,
+            "effective_is_specific_only": method.effective_is_specific_only,
+            "input_cost": method.input_cost,
+            "output_value": method.output_value,
+            "profit": method.profit,
+            "profit_margin_percent": method.profit_margin_percent,
+            "missing_price_goods": method.missing_price_goods or [],
+        }
+        for method in methods
+    ]
+
     return {
         "goods": goods,
         "buildings": sorted(buildings, key=lambda item: item["name"]),
         "output_modifiers": _advancement_output_modifiers(advancements),
-        "methods": [
-            {
-                "name": method.name,
-                "produced": method.produced,
-                "output": method.output,
-                "input_goods": method.input_goods,
-                "input_amounts": method.input_amounts,
-                "building": method.building,
-                "source_layer": method.source_layer,
-                "source_mod": method.source_mod,
-                "source_mode": method.source_mode,
-                "source_history": method.source_history,
-                "provenance_state": _provenance_state(
-                    method.source_layer,
-                    method.source_mod,
-                    method.source_mode,
-                    method.source_history,
-                ),
-                "unlock_age": method.unlock_age,
-                "general_unlock_age": method.general_unlock_age,
-                "specific_unlock_age": method.specific_unlock_age,
-                "availability_kind": method.availability_kind,
-                "is_specific_only": method.is_specific_only,
-                "building_unlock_age": method.building_unlock_age,
-                "building_general_unlock_age": method.building_general_unlock_age,
-                "building_specific_unlock_age": method.building_specific_unlock_age,
-                "building_availability_kind": method.building_availability_kind,
-                "building_is_specific_only": method.building_is_specific_only,
-                "effective_unlock_age": method.effective_unlock_age,
-                "effective_general_unlock_age": method.effective_general_unlock_age,
-                "effective_specific_unlock_age": method.effective_specific_unlock_age,
-                "effective_availability_kind": method.effective_availability_kind,
-                "effective_is_specific_only": method.effective_is_specific_only,
-                "input_cost": method.input_cost,
-                "output_value": method.output_value,
-                "profit": method.profit,
-                "profit_margin_percent": method.profit_margin_percent,
-                "missing_price_goods": method.missing_price_goods or [],
-            }
-            for method in methods
-        ],
+        "methods": method_payloads,
+        "progressionByGood": _progression_by_good(method_payloads, buildings_by_name),
     }
+
+
+def _progression_by_good(
+    methods: list[dict[str, Any]],
+    buildings_by_name: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    rows_by_good: dict[str, dict[str, dict[str, Any]]] = {}
+    method_building_refs = _method_building_refs(buildings_by_name)
+    for method in methods:
+        produced = method.get("produced")
+        if not produced:
+            continue
+        building_names = set(method_building_refs.get(method["name"], []))
+        if method.get("building"):
+            building_names.add(method["building"])
+        for building_name in sorted(building_names):
+            building = buildings_by_name.get(building_name)
+            if building is None:
+                continue
+            method_for_building = _method_with_building_context(method, building)
+            family = building.get("upgrade_family") or building_name
+            good_rows = rows_by_good.setdefault(produced, {})
+            row = good_rows.setdefault(
+                family,
+                {
+                    "family": family,
+                    "buildings": {},
+                    "inputs": [],
+                    "earliest_age": None,
+                },
+            )
+            stage = row["buildings"].setdefault(
+                building_name,
+                {
+                    "building": building,
+                    "methods": [],
+                    "events": [_building_unlock_event(building)],
+                    "inputs": [],
+                    "earliest_age": _building_progression_age(building),
+                },
+            )
+            stage["methods"].append(method_for_building)
+            stage["events"].append(_method_unlock_event(method_for_building))
+            stage["inputs"].extend(method_for_building.get("input_goods") or [])
+            stage["earliest_age"] = _earliest_progression_age(
+                stage["earliest_age"],
+                method_for_building,
+            )
+            row["inputs"].extend(method_for_building.get("input_goods") or [])
+            row["earliest_age"] = _earliest_progression_age(
+                row["earliest_age"],
+                method_for_building,
+            )
+            row["earliest_age"] = _earliest_age_value(
+                row["earliest_age"],
+                _building_progression_age(building),
+            )
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    for good, rows in rows_by_good.items():
+        result[good] = sorted(
+            (
+                {
+                    "family": row["family"],
+                    "inputs": sorted(set(row["inputs"])),
+                    "earliest_age": row["earliest_age"],
+                    "buildings": _sorted_progression_stages(row["buildings"].values()),
+                }
+                for row in rows.values()
+            ),
+            key=lambda item: (
+                _age_sort_key(item["earliest_age"]),
+                item["family"],
+            ),
+        )
+    return result
+
+
+def _method_building_refs(
+    buildings_by_name: dict[str, dict[str, Any]],
+) -> dict[str, list[str]]:
+    refs: dict[str, list[str]] = {}
+    for building in buildings_by_name.values():
+        for method in building.get("production_methods") or []:
+            refs.setdefault(method, []).append(building["name"])
+    return refs
+
+
+def _method_with_building_context(
+    method: dict[str, Any],
+    building: dict[str, Any],
+) -> dict[str, Any]:
+    result = dict(method)
+    result["building"] = building["name"]
+    result["building_unlock_age"] = building.get("unlock_age")
+    result["building_general_unlock_age"] = building.get("general_unlock_age")
+    result["building_specific_unlock_age"] = building.get("specific_unlock_age")
+    result["building_availability_kind"] = building.get("availability_kind")
+    result["building_is_specific_only"] = building.get("is_specific_only")
+    general_age = _latest_age_value(
+        result.get("general_unlock_age"),
+        result.get("building_general_unlock_age"),
+    )
+    specific_age = _latest_age_value(
+        result.get("specific_unlock_age"),
+        result.get("building_specific_unlock_age"),
+    )
+    result["effective_general_unlock_age"] = general_age
+    result["effective_specific_unlock_age"] = specific_age
+    result["effective_unlock_age"] = _latest_age_value(
+        result.get("unlock_age"),
+        result.get("building_unlock_age"),
+    )
+    if (
+        building.get("availability_kind") == "specific_only"
+        or result.get("availability_kind") == "specific_only"
+    ):
+        result["effective_availability_kind"] = "specific_only"
+        result["effective_is_specific_only"] = True
+    elif result["effective_unlock_age"] or general_age:
+        result["effective_availability_kind"] = "unlocked"
+        result["effective_is_specific_only"] = False
+    return result
+
+
+def _method_slot_label(group_index: int | None) -> str:
+    return "Shared" if group_index is None else f"Slot {group_index + 1}"
+
+
+def _building_unlock_event(building: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "building_unlock",
+        "building": building["name"],
+        "label": building["name"],
+        "unlock_age": building.get("unlock_age"),
+        "general_unlock_age": building.get("general_unlock_age"),
+        "specific_unlock_age": building.get("specific_unlock_age"),
+        "availability_kind": building.get("availability_kind"),
+        "is_specific_only": building.get("is_specific_only"),
+    }
+
+
+def _method_unlock_event(method: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "method_unlock",
+        "building": method.get("building"),
+        "method": method.get("name"),
+        "label": method.get("name"),
+        "unlock_age": method.get("unlock_age"),
+        "general_unlock_age": method.get("general_unlock_age"),
+        "specific_unlock_age": method.get("specific_unlock_age"),
+        "availability_kind": method.get("availability_kind"),
+        "is_specific_only": method.get("is_specific_only"),
+        "effective_unlock_age": method.get("effective_unlock_age"),
+        "effective_general_unlock_age": method.get("effective_general_unlock_age"),
+        "effective_specific_unlock_age": method.get("effective_specific_unlock_age"),
+        "effective_availability_kind": method.get("effective_availability_kind"),
+        "effective_is_specific_only": method.get("effective_is_specific_only"),
+    }
+
+
+def _sorted_progression_stages(stages: Any) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {
+                **stage,
+                "inputs": sorted(set(stage["inputs"])),
+                "methods": sorted(
+                    stage["methods"],
+                    key=lambda item: (
+                        item.get("production_method_group_index")
+                        if item.get("production_method_group_index") is not None
+                        else 9999,
+                        item["name"],
+                    ),
+                ),
+                "events": _sorted_progression_events(stage["events"]),
+            }
+            for stage in stages
+        ),
+        key=lambda item: (
+            item["building"].get("upgrade_tier")
+            if item["building"].get("upgrade_tier") is not None
+            else 999,
+            _age_sort_key(item["earliest_age"]),
+            item["building"]["name"],
+        ),
+    )
+
+
+def _sorted_progression_events(events: Any) -> list[dict[str, Any]]:
+    return sorted(
+        events,
+        key=lambda item: (
+            _age_sort_key(_event_progression_age(item)),
+            0 if item.get("type") == "building_unlock" else 1,
+            str(item.get("label") or ""),
+        ),
+    )
+
+
+def _event_progression_age(event: dict[str, Any]) -> str | None:
+    if event.get("type") == "method_unlock":
+        return _earliest_age_from_values(
+            event.get("effective_general_unlock_age"),
+            event.get("effective_unlock_age"),
+            event.get("effective_specific_unlock_age"),
+            event.get("general_unlock_age"),
+            event.get("unlock_age"),
+            event.get("specific_unlock_age"),
+        )
+    return _earliest_age_from_values(
+        event.get("general_unlock_age"),
+        event.get("unlock_age"),
+        event.get("specific_unlock_age"),
+    )
+
+
+def _building_progression_age(building: dict[str, Any]) -> str | None:
+    return _earliest_age_from_values(
+        building.get("general_unlock_age"),
+        building.get("unlock_age"),
+        building.get("specific_unlock_age"),
+    )
+
+
+def _earliest_age_value(current: str | None, age: str | None) -> str | None:
+    if age is None:
+        return current
+    if current is None or _age_sort_key(age) < _age_sort_key(current):
+        return age
+    return current
+
+
+def _earliest_age_from_values(*ages: Any) -> str | None:
+    current: str | None = None
+    for age in ages:
+        if isinstance(age, str):
+            current = _earliest_age_value(current, age)
+    return current
+
+
+def _earliest_progression_age(current: str | None, method: dict[str, Any]) -> str | None:
+    ages = [
+        method.get("effective_general_unlock_age"),
+        method.get("effective_unlock_age"),
+        method.get("building_general_unlock_age"),
+        method.get("building_unlock_age"),
+        method.get("general_unlock_age"),
+        method.get("unlock_age"),
+    ]
+    for age in ages:
+        if isinstance(age, str):
+            current = _earliest_age_value(current, age)
+    return current
+
+
+def _latest_age_value(left: Any, right: Any) -> str | None:
+    left_age = left if isinstance(left, str) else None
+    right_age = right if isinstance(right, str) else None
+    if left_age is None:
+        return right_age
+    if right_age is None:
+        return left_age
+    return left_age if _age_sort_key(left_age) >= _age_sort_key(right_age) else right_age
+
+
+def _age_sort_key(age: str | None) -> int:
+    if age is None:
+        return -1
+    try:
+        return list(AGE_ORDER).index(age)
+    except ValueError:
+        return len(AGE_ORDER)
+
+
+def _attach_upgrade_metadata(buildings_by_name: dict[str, dict[str, Any]]) -> None:
+    metadata = _load_upgrade_metadata(buildings_by_name.values())
+    metadata.update(_obsolete_upgrade_metadata(buildings_by_name, metadata))
+    for building in buildings_by_name.values():
+        upgrade = metadata.get(building["name"], {})
+        building["upgrade_family"] = upgrade.get("family") or building["name"]
+        building["upgrade_tier"] = upgrade.get("tier")
+        building["upgrade_previous"] = upgrade.get("previous")
+        building["upgrade_next"] = upgrade.get("next")
+        building["upgrade_source"] = upgrade.get("source") or "none"
+
+
+def _load_upgrade_metadata(buildings: Any) -> dict[str, dict[str, Any]]:
+    roots: list[Path] = []
+    for building in buildings:
+        source_file = building.get("source_file")
+        if not source_file:
+            continue
+        source_path = Path(source_file)
+        parts = list(source_path.parts)
+        if "mod" not in parts:
+            continue
+        root = Path(*parts[: parts.index("mod")])
+        blueprint_root = root / "blueprints" / "accepted" / "buildings"
+        if blueprint_root.is_dir() and blueprint_root not in roots:
+            roots.append(blueprint_root)
+
+    metadata: dict[str, dict[str, Any]] = {}
+    for root in roots:
+        for path in root.glob("*.yml"):
+            item = _parse_blueprint_upgrade(path)
+            if item is not None:
+                metadata[item["name"]] = item
+
+    for name, item in list(metadata.items()):
+        if not item.get("family"):
+            item["family"] = _upgrade_family(name, metadata)
+    return metadata
+
+
+def _parse_blueprint_upgrade(path: Path) -> dict[str, Any] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    item: dict[str, Any] = {"name": path.stem, "source": "blueprint"}
+    in_upgrade = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "upgrade_chain:":
+            in_upgrade = True
+            continue
+        if in_upgrade and line and not line.startswith((" ", "\t")):
+            break
+        if not in_upgrade or ":" not in stripped:
+            continue
+        field, raw_value = stripped.split(":", 1)
+        value = raw_value.strip()
+        if value == "null":
+            parsed: str | int | None = None
+        elif field == "tier":
+            try:
+                parsed = int(value)
+            except ValueError:
+                parsed = None
+        else:
+            parsed = value.strip("'\"")
+        if field in {"family", "tier", "previous", "next"}:
+            item[field] = parsed
+    return item if any(field in item for field in ("family", "tier", "previous", "next")) else None
+
+
+def _obsolete_upgrade_metadata(
+    buildings_by_name: dict[str, dict[str, Any]],
+    blueprint_metadata: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    blueprint_names = set(blueprint_metadata)
+    outgoing: dict[str, set[str]] = {}
+    incoming: dict[str, set[str]] = {}
+    nodes: set[str] = set()
+    for current, building in buildings_by_name.items():
+        if current in blueprint_names:
+            continue
+        for previous in building.get("obsolete_buildings") or []:
+            if previous not in buildings_by_name or previous in blueprint_names:
+                continue
+            outgoing.setdefault(previous, set()).add(current)
+            incoming.setdefault(current, set()).add(previous)
+            nodes.update({previous, current})
+
+    metadata: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for start in sorted(nodes):
+        if start in seen:
+            continue
+        component = _obsolete_component(start, outgoing, incoming)
+        seen.update(component)
+        roots = sorted(node for node in component if not incoming.get(node))
+        family = roots[0] if roots else sorted(component)[0]
+        tiers = _obsolete_component_tiers(component, roots or [family], outgoing)
+        for node in sorted(component):
+            previous = sorted(incoming.get(node, set()) & component)
+            next_nodes = sorted(outgoing.get(node, set()) & component)
+            metadata[node] = {
+                "family": family,
+                "tier": tiers.get(node),
+                "previous": previous[0] if previous else None,
+                "next": next_nodes[0] if next_nodes else None,
+                "source": "obsolete",
+            }
+    return metadata
+
+
+def _obsolete_component(
+    start: str,
+    outgoing: dict[str, set[str]],
+    incoming: dict[str, set[str]],
+) -> set[str]:
+    component: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node in component:
+            continue
+        component.add(node)
+        stack.extend(sorted(outgoing.get(node, set()) | incoming.get(node, set())))
+    return component
+
+
+def _obsolete_component_tiers(
+    component: set[str],
+    roots: list[str],
+    outgoing: dict[str, set[str]],
+) -> dict[str, int]:
+    tiers = {root: 0 for root in roots}
+    stack = [(root, 0) for root in roots]
+    while stack:
+        node, tier = stack.pop()
+        for child in sorted(outgoing.get(node, set()) & component):
+            next_tier = tier + 1
+            if next_tier <= tiers.get(child, -1):
+                continue
+            tiers[child] = next_tier
+            stack.append((child, next_tier))
+    for node in component:
+        tiers.setdefault(node, 0)
+    return tiers
+
+
+def _upgrade_family(name: str, metadata: dict[str, dict[str, Any]]) -> str:
+    seen: set[str] = set()
+    current = name
+    while current not in seen:
+        seen.add(current)
+        previous = metadata.get(current, {}).get("previous")
+        if not isinstance(previous, str) or previous not in metadata:
+            return current
+        current = previous
+    return name
+
+
+def _attach_building_icon_urls(
+    network: dict[str, Any],
+    output_path: Path,
+    *,
+    profile: str | None = "merged_default",
+    load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
+) -> None:
+    cache_dir = output_path.parent / "assets" / "building_icons"
+    panel_cache_dir = output_path.parent / "assets" / "building_icon_panels"
+    profile_roots = _profile_game_roots(profile, load_order_path)
+    for building in network["buildings"]:
+        source = _building_icon_source(building, profile_roots=profile_roots)
+        building["icon_source"] = str(source) if source is not None else None
+        building["icon_url"] = None
+        building["icon_panel_url"] = None
+        if source is None:
+            continue
+        url = _browser_icon_url(source, output_path, cache_dir)
+        building["icon_url"] = url
+        panel_url = _browser_icon_panel_url(source, output_path, cache_dir, panel_cache_dir)
+        building["icon_panel_url"] = panel_url
+    building_icons = {building["name"]: building for building in network["buildings"]}
+    for rows in network.get("progressionByGood", {}).values():
+        for row in rows:
+            for stage in row.get("buildings", []):
+                building = building_icons.get(stage["building"]["name"])
+                if building is not None:
+                    stage["building"] = building
+    for method in network.get("methods", []):
+        building = building_icons.get(method.get("building"))
+        method["building_icon_url"] = None if building is None else building.get("icon_url")
+        method["building_icon_panel_url"] = (
+            None if building is None else building.get("icon_panel_url")
+        )
+
+
+def _attach_graph_icon_urls(
+    graph: dict[str, list[dict[str, Any]]],
+    data: BuildingData,
+    output_path: Path,
+    *,
+    profile: str | None = "merged_default",
+    load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
+) -> None:
+    network = {
+        "buildings": [
+            {
+                "name": row["name"],
+                "icon": row.get("icon"),
+                "source_file": row.get("source_file"),
+                "source_history": row.get("source_history"),
+            }
+            for row in data.buildings.to_dicts()
+        ],
+        "progressionByGood": {},
+        "methods": [],
+    }
+    _attach_building_icon_urls(
+        network,
+        output_path,
+        profile=profile,
+        load_order_path=load_order_path,
+    )
+    icons = {building["name"]: building for building in network["buildings"]}
+    for node in graph["nodes"]:
+        building = node.get("data", {}).get("building")
+        icon = icons.get(building)
+        if not icon or not icon.get("icon_url") or not icon.get("icon_panel_url"):
+            continue
+        node["data"]["building_icon_url"] = icon["icon_url"]
+        node["data"]["building_icon_panel_url"] = icon["icon_panel_url"]
+        node["classes"] = f'{node.get("classes", "")} has-building-icon'.strip()
+
+
+def _building_icon_source(
+    building: dict[str, Any],
+    *,
+    profile_roots: list[Path] | None = None,
+) -> Path | None:
+    source_file = building.get("source_file")
+    icon_names = _building_icon_names(building)
+    if not icon_names:
+        return None
+    roots: list[Path] = []
+    if source_file:
+        roots.extend(_candidate_game_roots(Path(source_file)))
+    for record in _parse_source_history(building.get("source_history")):
+        record_file = record.get("file")
+        if isinstance(record_file, str) and record_file:
+            roots.extend(_candidate_game_roots(Path(record_file)))
+    roots.extend(profile_roots or [])
+    roots = _unique_paths(roots)
+    candidates: list[Path] = []
+    for root in roots:
+        for icon_dir in _candidate_icon_dirs(root):
+            for icon_name in icon_names:
+                candidates.append(icon_dir / f"{icon_name}.png")
+                candidates.append(icon_dir / f"{icon_name}.dds")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[-1] if candidates else None
+
+
+def _building_icon_names(building: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for value in (building.get("icon"), building.get("name")):
+        if isinstance(value, str) and value and value not in names:
+            names.append(value)
+    return names
+
+
+def _profile_game_roots(
+    profile: str | None,
+    load_order_path: str | Path,
+) -> list[Path]:
+    if profile is None:
+        return []
+    try:
+        load_order = LoadOrderConfig.load(load_order_path)
+        return [layer.root for layer in load_order.profile(profile).layers]
+    except Exception:
+        return []
+
+
+def _candidate_game_roots(source_path: Path) -> list[Path]:
+    parts = list(source_path.parts)
+    roots: list[Path] = []
+    for marker in ("in_game", "main_menu"):
+        if marker in parts:
+            index = parts.index(marker)
+            root = Path(*parts[:index])
+            if root not in roots:
+                roots.append(root)
+    if source_path.parent not in roots:
+        roots.append(source_path.parent)
+    return roots
+
+
+def _candidate_icon_dirs(root: Path) -> list[Path]:
+    dirs: list[Path] = []
+    for base in (root, root / "game"):
+        for scope in ("in_game", "main_menu"):
+            icon_dir = base / scope / "gfx" / "interface" / "icons" / "buildings"
+            if icon_dir not in dirs:
+                dirs.append(icon_dir)
+    return dirs
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _browser_icon_url(source: Path, output_path: Path, cache_dir: Path) -> str | None:
+    icon_path = _browser_icon_asset(source, cache_dir)
+    if icon_path is None:
+        return None
+    return _relative_url(icon_path, output_path.parent)
+
+
+def _browser_icon_asset(source: Path, cache_dir: Path) -> Path | None:
+    if source.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"} and source.is_file():
+        return source
+    if source.suffix.lower() != ".dds" or not source.is_file():
+        return None
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    preview = cache_dir / f"{source.stem}.png"
+    if not preview.exists() or source.stat().st_mtime > preview.stat().st_mtime:
+        if not _convert_dds_preview(source, preview):
+            return None
+    return preview
+
+
+def _browser_icon_panel_url(
+    source: Path,
+    output_path: Path,
+    icon_cache_dir: Path,
+    panel_cache_dir: Path,
+) -> str | None:
+    icon_path = _browser_icon_asset(source, icon_cache_dir)
+    if icon_path is None or not icon_path.is_file():
+        return None
+    panel_cache_dir.mkdir(parents=True, exist_ok=True)
+    panel = panel_cache_dir / f"{icon_path.stem}.svg"
+    if panel.exists() and panel.stat().st_mtime >= icon_path.stat().st_mtime:
+        return _relative_url(panel, output_path.parent)
+
+    mime_by_suffix = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }
+    mime = mime_by_suffix.get(icon_path.suffix.lower(), "image/png")
+    encoded_icon = base64.b64encode(icon_path.read_bytes()).decode("ascii")
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="292" height="116" '
+        'viewBox="0 0 292 116">'
+        f'<image href="data:{mime};base64,{encoded_icon}" x="18" y="29" '
+        'width="58" height="58" preserveAspectRatio="xMidYMid meet"/>'
+        '<path d="M92 16v84" stroke="#0f766e" stroke-width="2" '
+        'stroke-linecap="round" opacity="0.72"/>'
+        "</svg>"
+    )
+    panel.write_text(svg, encoding="utf-8")
+    return _relative_url(panel, output_path.parent)
+
+
+def _convert_dds_preview(source: Path, preview: Path) -> bool:
+    try:
+        from PIL import Image
+
+        with Image.open(source) as image:
+            image.thumbnail((64, 64))
+            image.convert("RGBA").save(preview)
+        return True
+    except Exception:
+        preview.unlink(missing_ok=True)
+        return False
+
+
+def _relative_url(path: Path, root: Path) -> str:
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+        return relative.as_posix()
+    except ValueError:
+        return path.resolve().as_uri()
 
 
 def _explorer_goods(
@@ -840,6 +1553,9 @@ def _add_method_node(nodes: dict[str, dict[str, Any]], method: _Method, level: i
                 "kind": "production_method",
                 "production_method": method.name,
                 "building": method.building,
+                "production_method_group": method.production_method_group,
+                "production_method_group_index": method.production_method_group_index,
+                "slot_label": _method_slot_label(method.production_method_group_index),
                 "source_layer": method.source_layer,
                 "source_mod": method.source_mod,
                 "source_mode": method.source_mode,
@@ -1026,6 +1742,35 @@ _CYTOSCAPE_STYLE = [
             "padding": "12px",
             "shape": "round-rectangle",
             "text-max-width": "220px",
+        },
+    },
+    {
+        "selector": ".has-building-icon",
+        "style": {
+            "background-image": "data(building_icon_panel_url)",
+            "background-fit": "contain",
+            "background-width": "100%",
+            "background-height": "100%",
+            "background-position-x": "50%",
+            "background-position-y": "50%",
+            "background-image-crossorigin": "null",
+            "background-image-opacity": 1,
+            "background-image-containment": "over",
+            "background-repeat": "no-repeat",
+            "background-opacity": 0.18,
+            "width": 292,
+            "height": 116,
+            "padding": "10px",
+            "text-halign": "center",
+            "text-valign": "center",
+            "text-justification": "center",
+            "text-max-width": "178px",
+            "text-margin-x": "48px",
+            "text-margin-y": "0px",
+            "text-background-color": "#ffffff",
+            "text-background-opacity": 0.92,
+            "text-background-padding": "5px",
+            "text-background-shape": "round-rectangle",
         },
     },
     {
@@ -1291,6 +2036,247 @@ def _explorer_html(
       overflow: auto;
       width: 100%;
     }}
+    #progressionView {{
+      background: #ffffff;
+      display: none;
+      height: 100%;
+      overflow: auto;
+      width: 100%;
+    }}
+    .progression-empty {{
+      color: #64748b;
+      font-size: 14px;
+      padding: 28px;
+    }}
+    .progression-legend {{
+      align-items: center;
+      background: #ffffff;
+      border-bottom: 1px solid #dbe4ef;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+    }}
+    .progression-legend-item {{
+      align-items: center;
+      color: #475569;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 700;
+      gap: 6px;
+    }}
+    .progression-swatch {{
+      border-radius: 3px;
+      display: inline-block;
+      height: 10px;
+      width: 18px;
+    }}
+    .progression-swatch.building {{
+      background: #2563eb;
+    }}
+    .progression-swatch.method {{
+      background: #14b8a6;
+    }}
+    .progression-swatch.slot {{
+      background: #0f766e;
+    }}
+    .progression-swatch.connector {{
+      background: #6366f1;
+    }}
+    .progression-swatch.specific {{
+      background: #f59e0b;
+    }}
+    .progression-grid {{
+      display: grid;
+      font-size: 12px;
+      grid-template-columns: 260px repeat({len(AGE_ORDER)}, minmax(150px, 1fr));
+      min-width: 1160px;
+      width: 100%;
+    }}
+    .progression-header {{
+      background: #f8fafc;
+      border-bottom: 1px solid #cbd5e1;
+      color: #475569;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 9px 10px;
+      position: sticky;
+      text-transform: uppercase;
+      top: 0;
+      z-index: 3;
+    }}
+    .progression-header:first-child {{
+      left: 0;
+      z-index: 5;
+    }}
+    .progression-lane-cell {{
+      border-bottom: 1px solid #e2e8f0;
+      min-height: 92px;
+      padding: 8px;
+      position: relative;
+    }}
+    .progression-lane-label {{
+      background: #ffffff;
+      border-bottom: 1px solid #e2e8f0;
+      left: 0;
+      min-height: 92px;
+      padding: 10px;
+      position: sticky;
+      z-index: 2;
+    }}
+    .progression-lane-cell::before {{
+      background: #6366f1;
+      content: "";
+      height: 2px;
+      left: 0;
+      opacity: 0.75;
+      position: absolute;
+      right: 0;
+      top: 38px;
+    }}
+    .progression-lane-cell.empty::before {{
+      opacity: 0.2;
+    }}
+    .progression-building {{
+      align-items: center;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 38px minmax(0, 1fr);
+    }}
+    .progression-icon {{
+      align-items: center;
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      display: flex;
+      height: 38px;
+      justify-content: center;
+      overflow: hidden;
+      width: 38px;
+    }}
+    .progression-icon img {{
+      display: block;
+      height: 100%;
+      object-fit: contain;
+      width: 100%;
+    }}
+    .progression-icon-fallback {{
+      color: #475569;
+      font-size: 11px;
+      font-weight: 800;
+    }}
+    .progression-building-name {{
+      font-size: 13px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .progression-building-meta {{
+      color: #64748b;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .progression-card {{
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-left: 4px solid #2563eb;
+      border-radius: 6px;
+      display: grid;
+      gap: 6px;
+      margin-bottom: 6px;
+      padding: 7px 8px;
+      position: relative;
+      z-index: 1;
+    }}
+    .progression-card-header {{
+      align-items: center;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 34px minmax(0, 1fr);
+    }}
+    .progression-card .progression-icon {{
+      height: 34px;
+      width: 34px;
+    }}
+    .progression-card.specific-only {{
+      border-left-color: #f59e0b;
+      opacity: 0.78;
+    }}
+    .progression-card.future {{
+      opacity: 0.42;
+    }}
+    .progression-card-title {{
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .progression-card-line {{
+      color: #475569;
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }}
+    .progression-slot-group {{
+      background: rgba(255, 255, 255, 0.5);
+      border-left: 2px solid #0f766e;
+      border-radius: 5px;
+      display: grid;
+      gap: 4px;
+      padding: 4px 0 0 6px;
+    }}
+    .progression-slot-group + .progression-slot-group {{
+      margin-top: 5px;
+    }}
+    .progression-slot-label {{
+      color: #0f766e;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }}
+    .progression-method-list {{
+      display: grid;
+      gap: 4px;
+    }}
+    .progression-method {{
+      background: #f0fdfa;
+      border: 1px solid #99f6e4;
+      border-left: 3px solid #14b8a6;
+      border-radius: 5px;
+      display: grid;
+      gap: 2px;
+      margin-bottom: 5px;
+      padding: 5px 6px;
+      position: relative;
+      z-index: 1;
+    }}
+    .progression-method.later::before {{
+      background: #6366f1;
+      content: "";
+      height: 14px;
+      left: 11px;
+      position: absolute;
+      top: -14px;
+      width: 2px;
+    }}
+    .progression-method.specific-only {{
+      border-left-color: #f59e0b;
+      opacity: 0.78;
+    }}
+    .progression-method.future {{
+      opacity: 0.42;
+    }}
+    .progression-method-name {{
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
     .designation-tally {{
       align-items: center;
       background: #ffffff;
@@ -1468,6 +2454,7 @@ def _explorer_html(
       <div class="tabs" aria-label="Explorer view">
         <button class="tab-button" id="overviewTab" type="button">Overview</button>
         <button class="tab-button active" id="flowTab" type="button">Flow</button>
+        <button class="tab-button" id="progressionTab" type="button">Progression</button>
         <button class="tab-button" id="modifierTab" type="button">Output Modifiers</button>
       </div>
       <div class="spacer"></div>
@@ -1539,6 +2526,7 @@ def _explorer_html(
     </header>
     <div id="cy"></div>
     <div id="goodsOverview"></div>
+    <div id="progressionView"></div>
     <details class="legend" open>
       <summary>Legend</summary>
       <div class="legend-body">
@@ -1659,14 +2647,68 @@ def _explorer_html(
         ? options.dataset.buildingOptions
         : options.dataset.goodOptions;
     }}
+    function matchingName(items, value) {{
+      const trimmed = value.trim();
+      if (!trimmed) return "";
+      if (items.some(item => item.name === trimmed)) return trimmed;
+      const lowered = trimmed.toLowerCase();
+      const match = items.find(item => item.name.toLowerCase() === lowered);
+      return match ? match.name : "";
+    }}
     function resolveSelection(type, value) {{
-      if (type === "building" && buildingsByName.has(value)) {{
-        return {{ type: "building", name: value }};
+      const name = type === "building"
+        ? matchingName(network.buildings, value)
+        : matchingName(network.goods, value);
+      if (name) {{
+        return {{ type, name }};
       }}
-      if (type === "good" && goodsByName.has(value)) {{
-        return {{ type: "good", name: value }};
+      if (type === "building" && initialSelection.type === "building") {{
+        return initialSelection;
       }}
-      return initialSelection;
+      if (type === "good" && initialSelection.type === "good") {{
+        return initialSelection;
+      }}
+      const fallback = type === "building" ? network.buildings[0] : network.goods[0];
+      return fallback ? {{ type, name: fallback.name }} : initialSelection;
+    }}
+    function enhanceSearchInput(input, normalize, commit) {{
+      let committedValue = input.value;
+      let suppressNextSelect = false;
+      const pickerClick = event => input.list && event.offsetX >= input.clientWidth - 36;
+      const selectText = () => window.requestAnimationFrame(() => input.select());
+      const commitCurrent = blurAfter => {{
+        const nextValue = normalize(input.value);
+        input.value = nextValue;
+        committedValue = nextValue;
+        commit(nextValue);
+        if (blurAfter) input.blur();
+      }};
+      input.addEventListener("pointerdown", event => {{
+        suppressNextSelect = pickerClick(event);
+      }});
+      input.addEventListener("focus", () => {{
+        if (!suppressNextSelect) selectText();
+      }});
+      input.addEventListener("click", () => {{
+        if (!suppressNextSelect) selectText();
+        suppressNextSelect = false;
+      }});
+      input.addEventListener("keydown", event => {{
+        if (event.key === "Enter") {{
+          event.preventDefault();
+          commitCurrent(true);
+        }} else if (event.key === "Escape") {{
+          event.preventDefault();
+          input.value = committedValue;
+          input.blur();
+        }}
+      }});
+      input.addEventListener("change", () => commitCurrent(false));
+      input.addEventListener("blur", () => {{
+        const nextValue = normalize(input.value);
+        input.value = nextValue;
+        committedValue = nextValue;
+      }});
     }}
     function ageAllowed(unlockAge, selectedAge) {{
       if (!selectedAge || !unlockAge) return true;
@@ -1880,6 +2922,404 @@ def _explorer_html(
       container.append(table);
       document.getElementById("graphMeta").textContent = `${{network.goods.length}} goods`;
     }}
+    function progressionGoodSelection() {{
+      const selectedInput = document.getElementById("entitySelect");
+      if (
+        document.getElementById("entityType").value === "good"
+        && goodsByName.has(selectedInput.value)
+      ) {{
+        return selectedInput.value;
+      }}
+      if (initialSelection.type === "good" && goodsByName.has(initialSelection.name)) {{
+        selectedInput.value = initialSelection.name;
+        document.getElementById("entityType").value = "good";
+        updateEntityOptions("good");
+        return initialSelection.name;
+      }}
+      const firstGood = network.goods[0] ? network.goods[0].name : "";
+      selectedInput.value = firstGood;
+      document.getElementById("entityType").value = "good";
+      updateEntityOptions("good");
+      return firstGood;
+    }}
+    function progressionInitials(name) {{
+      return String(name || "?")
+        .split("_")
+        .filter(Boolean)
+        .slice(0, 2)
+        .map(part => part[0].toUpperCase())
+        .join("") || "?";
+    }}
+    function progressionSelectedAge(method, includeSpecific) {{
+      const methodAge = selectedUnlockAge(
+        method.general_unlock_age,
+        method.specific_unlock_age,
+        method.unlock_age,
+        includeSpecific
+      );
+      const buildingAge = selectedUnlockAge(
+        method.building_general_unlock_age,
+        method.building_specific_unlock_age,
+        method.building_unlock_age,
+        includeSpecific
+      );
+      return latestAge(methodAge, buildingAge);
+    }}
+    function progressionEventSelectedAge(event, includeSpecific) {{
+      if (event.type === "method_unlock") {{
+        return selectedUnlockAge(
+          event.effective_general_unlock_age,
+          event.effective_specific_unlock_age,
+          event.effective_unlock_age,
+          includeSpecific
+        ) || selectedUnlockAge(
+          event.general_unlock_age,
+          event.specific_unlock_age,
+          event.unlock_age,
+          includeSpecific
+        );
+      }}
+      return selectedUnlockAge(
+        event.general_unlock_age,
+        event.specific_unlock_age,
+        event.unlock_age,
+        includeSpecific
+      );
+    }}
+    function progressionDisplayAge(age) {{
+      return age || ageOrder[0];
+    }}
+    function progressionEventAllowedBySpecific(event, includeSpecific) {{
+      const kind = event.effective_availability_kind
+        || event.availability_kind
+        || "available_by_default";
+      return includeSpecific || kind !== "specific_only";
+    }}
+    function progressionEventFuture(event, selectedAge, includeSpecific) {{
+      return selectedAge
+        ? !ageAllowed(progressionEventSelectedAge(event, includeSpecific), selectedAge)
+        : false;
+    }}
+    function progressionMethodAllowed(method, selectedAge, includeSpecific) {{
+      const kind = method.effective_availability_kind
+        || method.availability_kind
+        || "available_by_default";
+      if (kind === "specific_only" && !includeSpecific) return false;
+      return !selectedAge
+        || ageAllowed(progressionSelectedAge(method, includeSpecific), selectedAge);
+    }}
+    function appendProgressionIcon(container, building) {{
+      const icon = document.createElement("div");
+      icon.className = "progression-icon";
+      if (building.icon_url) {{
+        const image = document.createElement("img");
+        image.src = building.icon_url;
+        image.alt = "";
+        image.loading = "lazy";
+        icon.append(image);
+      }} else {{
+        const fallback = document.createElement("span");
+        fallback.className = "progression-icon-fallback";
+        fallback.textContent = progressionInitials(building.name);
+        icon.append(fallback);
+      }}
+      container.append(icon);
+    }}
+    function appendProgressionLegend(container) {{
+      const legend = document.createElement("div");
+      legend.className = "progression-legend";
+      const items = [
+        ["building", "Building unlock"],
+        ["method", "Method unlock"],
+        ["slot", "Method slot"],
+        ["connector", "Upgrade connector"],
+        ["specific", "Specific/regional"]
+      ];
+      for (const [kind, label] of items) {{
+        const item = document.createElement("span");
+        item.className = "progression-legend-item";
+        const swatch = document.createElement("span");
+        swatch.className = `progression-swatch ${{kind}}`;
+        const text = document.createElement("span");
+        text.textContent = label;
+        item.append(swatch, text);
+        legend.append(item);
+      }}
+      container.append(legend);
+    }}
+    function progressionBuildingStats(building) {{
+      const parts = [];
+      if (building.effective_price_gold !== null && building.effective_price_gold !== undefined) {{
+        parts.push(`Cost: ${{formatMetricValue(building.effective_price_gold)}} gold`);
+      }}
+      if (building.pop_type) parts.push(`Pop: ${{building.pop_type}}`);
+      if (building.employment_size !== null && building.employment_size !== undefined) {{
+        parts.push(`Employment: ${{formatMetricValue(building.employment_size)}}`);
+      }}
+      return parts.join(" \\u00b7 ");
+    }}
+    function progressionBuildingStatsTitle(building, statsText) {{
+      if (building.price_kind === "baseline_age" && building.effective_price) {{
+        return `${{statsText}}\\nBaseline age price: ${{building.effective_price}}`;
+      }}
+      return statsText;
+    }}
+    function progressionMethodEvent(stage, method) {{
+      return (stage.events || []).find(event =>
+        event.type === "method_unlock" && event.method === method.name
+      ) || {{
+        type: "method_unlock",
+        method: method.name,
+        label: method.name,
+        effective_unlock_age: progressionSelectedAge(method, true),
+        effective_general_unlock_age: method.effective_general_unlock_age,
+        effective_specific_unlock_age: method.effective_specific_unlock_age,
+        effective_availability_kind: method.effective_availability_kind,
+        availability_kind: method.availability_kind
+      }};
+    }}
+    function appendProgressionMethod(
+      container,
+      method,
+      event,
+      selectedGood,
+      selectedAge,
+      includeSpecific,
+      later
+    ) {{
+      const methodItem = document.createElement("div");
+      methodItem.className = "progression-method";
+      if (later) methodItem.classList.add("later");
+      const kind = event.effective_availability_kind || event.availability_kind;
+      if (kind === "specific_only") methodItem.classList.add("specific-only");
+      if (progressionEventFuture(event, selectedAge, includeSpecific)) {{
+        methodItem.classList.add("future");
+      }}
+      const methodName = document.createElement("div");
+      methodName.className = "progression-method-name";
+      methodName.textContent = method.name;
+      methodName.title = method.name;
+      const output = document.createElement("div");
+      output.className = "progression-card-line";
+      output.textContent = `Output: ${{amountLabel(method.output)}} ${{selectedGood}}`;
+      const metrics = document.createElement("div");
+      metrics.className = "progression-card-line";
+      metrics.textContent = `Profit: ${{formatMetricValue(method.profit, true)}}`;
+      methodItem.append(methodName, output, metrics);
+      container.append(methodItem);
+    }}
+    function progressionSlotLabel(method) {{
+      if (method.slot_label) return method.slot_label;
+      return method.production_method_group_index === null
+        || method.production_method_group_index === undefined
+        ? "Shared"
+        : `Slot ${{Number(method.production_method_group_index) + 1}}`;
+    }}
+    function progressionSlotSortKey(label) {{
+      if (label === "Shared") return 9999;
+      const match = /^Slot\\s+(\\d+)$/.exec(label);
+      return match ? Number(match[1]) : 9998;
+    }}
+    function appendProgressionMethodGroups(
+      container,
+      methodEvents,
+      selectedGood,
+      selectedAge,
+      includeSpecific,
+      later
+    ) {{
+      if (!methodEvents.length) return;
+      const groups = new Map();
+      for (const [method, event] of methodEvents) {{
+        const label = progressionSlotLabel(method);
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push([method, event]);
+      }}
+      const labels = Array.from(groups.keys()).sort((left, right) =>
+        progressionSlotSortKey(left) - progressionSlotSortKey(right)
+        || left.localeCompare(right)
+      );
+      for (const label of labels) {{
+        const group = document.createElement("div");
+        group.className = "progression-slot-group";
+        const header = document.createElement("div");
+        header.className = "progression-slot-label";
+        header.textContent = label;
+        group.append(header);
+        for (const [method, event] of groups.get(label)) {{
+          appendProgressionMethod(
+            group,
+            method,
+            event,
+            selectedGood,
+            selectedAge,
+            includeSpecific,
+            later
+          );
+        }}
+        container.append(group);
+      }}
+    }}
+    function renderProgression() {{
+      const container = document.getElementById("progressionView");
+      container.replaceChildren();
+      const selectedGood = progressionGoodSelection();
+      const selectedAge = document.getElementById("ageFilter").value;
+      const includeSpecific = document.getElementById("specificUnlocks").checked;
+      const rows = (network.progressionByGood && network.progressionByGood[selectedGood]) || [];
+      const visibleRows = rows
+        .map(row => ({{
+          ...row,
+          buildings: (row.buildings || [])
+            .map(stage => ({{
+              ...stage,
+              methods: (stage.methods || [])
+            }}))
+            .filter(stage => stage.methods.length > 0)
+        }}))
+        .filter(row => row.buildings.length > 0);
+      if (!visibleRows.length) {{
+        const empty = document.createElement("div");
+        empty.className = "progression-empty";
+        empty.textContent = `No parsed building progression for ${{selectedGood}} at this age.`;
+        container.append(empty);
+        document.getElementById("graphMeta").textContent = `${{selectedGood}} progression`;
+        return;
+      }}
+      appendProgressionLegend(container);
+      const grid = document.createElement("div");
+      grid.className = "progression-grid";
+      const buildingHeader = document.createElement("div");
+      buildingHeader.className = "progression-header";
+      buildingHeader.textContent = "Building line";
+      grid.append(buildingHeader);
+      for (const age of ageOrder) {{
+        const th = document.createElement("div");
+        th.className = "progression-header";
+        th.textContent = age;
+        grid.append(th);
+      }}
+      for (const row of visibleRows) {{
+        const buildingCell = document.createElement("div");
+        buildingCell.className = "progression-lane-label";
+        const buildingWrap = document.createElement("div");
+        buildingWrap.className = "progression-building";
+        const primaryStage = (row.buildings || [])[0];
+        if (primaryStage) appendProgressionIcon(buildingWrap, primaryStage.building);
+        const labelWrap = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "progression-building-name";
+        name.textContent = row.family;
+        name.title = row.family;
+        const meta = document.createElement("div");
+        meta.className = "progression-building-meta";
+        const stageCount = (row.buildings || []).length;
+        meta.textContent = (row.inputs || []).length
+          ? `${{stageCount}} stages · Inputs: ${{row.inputs.join(", ")}}`
+          : "No inputs";
+        meta.title = meta.textContent;
+        labelWrap.append(name, meta);
+        buildingWrap.append(labelWrap);
+        buildingCell.append(buildingWrap);
+        grid.append(buildingCell);
+        for (const age of ageOrder) {{
+          const td = document.createElement("div");
+          td.className = "progression-lane-cell empty";
+          for (const stage of row.buildings || []) {{
+            const buildingEvent = (stage.events || []).find(event =>
+              event.type === "building_unlock"
+            ) || {{
+              type: "building_unlock",
+              availability_kind: stage.building.availability_kind,
+              general_unlock_age: stage.building.general_unlock_age,
+              specific_unlock_age: stage.building.specific_unlock_age,
+              unlock_age: stage.building.unlock_age
+            }};
+            const buildingAge = progressionDisplayAge(
+              progressionEventSelectedAge(buildingEvent, includeSpecific)
+            );
+            const immediateMethods = [];
+            const laterMethods = [];
+            for (const method of stage.methods || []) {{
+              const event = progressionMethodEvent(stage, method);
+              const eventAge = progressionDisplayAge(
+                progressionEventSelectedAge(event, includeSpecific)
+              );
+              if (eventAge === buildingAge) {{
+                immediateMethods.push([method, event]);
+              }} else if (eventAge === age) {{
+                laterMethods.push([method, event]);
+              }}
+            }}
+            if (buildingAge !== age && laterMethods.length === 0) continue;
+            td.classList.remove("empty");
+            if (buildingAge !== age) {{
+              appendProgressionMethodGroups(
+                td,
+                laterMethods,
+                selectedGood,
+                selectedAge,
+                includeSpecific,
+                true
+              );
+              continue;
+            }}
+            const card = document.createElement("div");
+            const stageSpecificOnly = buildingEvent.availability_kind === "specific_only";
+            card.className = "progression-card";
+            if (stageSpecificOnly) card.classList.add("specific-only");
+            if (progressionEventFuture(buildingEvent, selectedAge, includeSpecific)) {{
+              card.classList.add("future");
+            }}
+            const header = document.createElement("div");
+            header.className = "progression-card-header";
+            appendProgressionIcon(header, stage.building);
+            const titleWrap = document.createElement("div");
+            const title = document.createElement("div");
+            title.className = "progression-card-title";
+            title.textContent = stage.building.name;
+            title.title = stage.building.name;
+            const unlock = document.createElement("div");
+            unlock.className = "progression-card-line";
+            unlock.textContent = stageSpecificOnly
+              ? "Building: specific unlock"
+              : "Building unlock";
+            const statsText = progressionBuildingStats(stage.building);
+            const stats = document.createElement("div");
+            stats.className = "progression-card-line";
+            stats.textContent = statsText;
+            stats.title = progressionBuildingStatsTitle(stage.building, statsText);
+            titleWrap.append(title, unlock);
+            if (statsText) titleWrap.append(stats);
+            header.append(titleWrap);
+            const methodList = document.createElement("div");
+            methodList.className = "progression-method-list";
+            appendProgressionMethodGroups(
+              methodList,
+              immediateMethods,
+              selectedGood,
+              selectedAge,
+              includeSpecific,
+              false
+            );
+            card.append(header, methodList);
+            td.append(card);
+            appendProgressionMethodGroups(
+              td,
+              laterMethods,
+              selectedGood,
+              selectedAge,
+              includeSpecific,
+              true
+            );
+          }}
+          grid.append(td);
+        }}
+      }}
+      container.append(grid);
+      document.getElementById("graphMeta").textContent =
+        `${{selectedGood}} \\u00b7 ${{visibleRows.length}} building lines`;
+    }}
     function methodMetricLines(method) {{
       return [
         `Input: ${{formatMetricValue(method.input_cost)}}`,
@@ -1911,6 +3351,18 @@ def _explorer_html(
       if (buildingContext) lines.push(buildingContext);
       lines.push(...methodMetricLines(method));
       return lines.join("\\n");
+    }}
+    function methodBuildingIconUrl(method, selectedBuilding = null) {{
+      if (method.building_icon_url) return method.building_icon_url;
+      const buildingContext = methodBuildingContext(method, selectedBuilding);
+      const building = buildingsByName.get(buildingContext);
+      return building ? building.icon_url : null;
+    }}
+    function methodBuildingIconPanelUrl(method, selectedBuilding = null) {{
+      if (method.building_icon_panel_url) return method.building_icon_panel_url;
+      const buildingContext = methodBuildingContext(method, selectedBuilding);
+      const building = buildingsByName.get(buildingContext);
+      return building ? building.icon_panel_url : null;
     }}
     function formatModifierValue(value) {{
       const numeric = Number(value);
@@ -1984,6 +3436,8 @@ def _explorer_html(
       const id = methodId(method.name);
       if (nodes.has(id)) return;
       const style = provenanceStyle(method);
+      const buildingIconUrl = methodBuildingIconUrl(method, selectedBuilding);
+      const buildingIconPanelUrl = methodBuildingIconPanelUrl(method, selectedBuilding);
       nodes.set(id, {{
         data: {{
           id,
@@ -1996,6 +3450,8 @@ def _explorer_html(
           profit: method.profit,
           profit_margin_percent: method.profit_margin_percent,
           missing_price_goods: method.missing_price_goods || [],
+          building_icon_url: buildingIconUrl,
+          building_icon_panel_url: buildingIconPanelUrl,
           source_layer: method.source_layer,
           source_mod: method.source_mod,
           source_mode: method.source_mode,
@@ -2019,7 +3475,9 @@ def _explorer_html(
           provenance_color: style.color,
           provenance_border_style: style.borderStyle
         }},
-        classes: "production-method"
+        classes: buildingIconUrl
+          ? "production-method has-building-icon"
+          : "production-method"
       }});
     }}
     function addEdge(edges, source, target, kind, amount, goods, extraData = {{}}) {{
@@ -2395,6 +3853,7 @@ def _explorer_html(
       nodeSep: 130,
       edgeSep: 48,
       rankSep: 260,
+      nodeDimensionsIncludeLabels: true,
       fit: true,
       padding: 80,
       animate: false
@@ -2445,7 +3904,7 @@ def _explorer_html(
           const rightLabel = right.data("label") || right.id();
           return leftLabel.localeCompare(rightLabel);
         }});
-        const spacing = scaledLayoutValue(role === "production_method" ? 170 : 120);
+        const spacing = scaledLayoutValue(role === "production_method" ? 220 : 150);
         const startY = -((nodes.length - 1) * spacing) / 2;
         const x = scaledLayoutValue(
           buildingRankedColumnX[role] ?? buildingRankedColumnX.production_method
@@ -2505,7 +3964,7 @@ def _explorer_html(
           const rightLabel = right.data("label") || right.id();
           return leftLabel.localeCompare(rightLabel);
         }});
-        const spacing = scaledLayoutValue(130);
+        const spacing = scaledLayoutValue(220);
         const startY = -((nodes.length - 1) * spacing) / 2;
         const x = scaledLayoutValue(column * 260);
         nodes.forEach((node, index) => {{
@@ -2662,7 +4121,7 @@ def _explorer_html(
       return network.goods[0] ? network.goods[0].name : "";
     }}
     function validModifierGood(value) {{
-      return goodsByName.has(value) ? value : defaultModifierGood();
+      return matchingName(network.goods, value) || defaultModifierGood();
     }}
     function applyExplorerGraph() {{
       if (currentExplorerView === "overview") {{
@@ -2673,6 +4132,13 @@ def _explorer_html(
         return;
       }}
       const includeSpecific = document.getElementById("specificUnlocks").checked;
+      if (currentExplorerView === "progression") {{
+        cy.elements().remove();
+        clearFocus();
+        renderProgression();
+        buildLegend([]);
+        return;
+      }}
       let elements;
       if (currentExplorerView === "modifiers") {{
         const modifierInput = document.getElementById("modifierGoodSelect");
@@ -2704,6 +4170,7 @@ def _explorer_html(
     }}
     function runCurrentLayout() {{
       if (currentExplorerView === "overview") return;
+      if (currentExplorerView === "progression") return;
       if (currentExplorerView === "modifiers") runModifierTimelineLayout();
       else if (currentLayout === "ranked") runRankedLayout();
       else runSpreadLayout();
@@ -2728,24 +4195,30 @@ def _explorer_html(
     }}
     function updateExplorerControls() {{
       const overviewActive = currentExplorerView === "overview";
+      const progressionActive = currentExplorerView === "progression";
       const flowActive = currentExplorerView === "flow";
       document.getElementById("overviewTab").classList.toggle("active", overviewActive);
       document.getElementById("flowTab").classList.toggle("active", flowActive);
+      document.getElementById("progressionTab").classList.toggle("active", progressionActive);
       document.getElementById("modifierTab").classList.toggle(
         "active",
         currentExplorerView === "modifiers"
       );
-      document.getElementById("cy").style.display = overviewActive ? "none" : "";
+      document.getElementById("cy").style.display =
+        overviewActive || progressionActive ? "none" : "";
       document.getElementById("goodsOverview").style.display = overviewActive ? "block" : "none";
-      document.querySelector(".legend").style.display = overviewActive ? "none" : "";
+      document.getElementById("progressionView").style.display =
+        progressionActive ? "block" : "none";
+      document.querySelector(".legend").style.display =
+        overviewActive || progressionActive ? "none" : "";
       for (const element of document.querySelectorAll(".flow-control")) {{
-        element.style.display = flowActive ? "" : "none";
+        element.style.display = flowActive || progressionActive ? "" : "none";
       }}
       for (const element of document.querySelectorAll(".modifier-control")) {{
         element.style.display = currentExplorerView === "modifiers" ? "" : "none";
       }}
       for (const element of document.querySelectorAll(".shared-graph-control")) {{
-        element.style.display = overviewActive ? "none" : "";
+        element.style.display = overviewActive || progressionActive ? "none" : "";
       }}
     }}
     function setExplorerView(view) {{
@@ -2770,13 +4243,29 @@ def _explorer_html(
       document.getElementById("ageFilter").value = initialAge || "";
       document.getElementById("depthInput").value = initialDepth;
       document.getElementById("specificUnlocks").checked = initialSpecificUnlocks;
-      const controlIds = [
-        "entitySelect",
-        "modifierGoodSelect",
-        "ageFilter",
-        "depthInput",
-        "specificUnlocks"
-      ];
+      enhanceSearchInput(
+        document.getElementById("entitySelect"),
+        value => selectionLabel(resolveSelection(
+          document.getElementById("entityType").value,
+          value
+        )),
+        value => {{
+          const selection = resolveSelection(document.getElementById("entityType").value, value);
+          document.getElementById("entityType").value = selection.type;
+          updateEntityOptions(selection.type);
+          document.getElementById("entitySelect").value = selectionLabel(selection);
+          applyExplorerGraph();
+        }}
+      );
+      enhanceSearchInput(
+        document.getElementById("modifierGoodSelect"),
+        value => validModifierGood(value),
+        value => {{
+          document.getElementById("modifierGoodSelect").value = validModifierGood(value);
+          applyExplorerGraph();
+        }}
+      );
+      const controlIds = ["ageFilter", "depthInput", "specificUnlocks"];
       for (const id of controlIds) {{
         document.getElementById(id).addEventListener("change", applyExplorerGraph);
       }}
@@ -2793,6 +4282,10 @@ def _explorer_html(
         () => setExplorerView("overview")
       );
       document.getElementById("flowTab").addEventListener("click", () => setExplorerView("flow"));
+      document.getElementById("progressionTab").addEventListener(
+        "click",
+        () => setExplorerView("progression")
+      );
       document.getElementById("modifierTab").addEventListener(
         "click",
         () => setExplorerView("modifiers")
@@ -3175,6 +4668,7 @@ def _standalone_html(
       nodeSep: 130,
       edgeSep: 48,
       rankSep: 260,
+      nodeDimensionsIncludeLabels: true,
       fit: true,
       padding: 80,
       animate: false

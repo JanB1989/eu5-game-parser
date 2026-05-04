@@ -67,6 +67,29 @@ merged_default = ["vanilla", "test_mod"]
     assert config.mods["test_mod"].root == config_dir / "mods" / "Test"
 
 
+def test_windows_drive_roots_resolve_to_wsl_mounts(tmp_path: Path) -> None:
+    path = tmp_path / "load_order.toml"
+    path.write_text(
+        r"""
+[paths]
+vanilla_root = 'C:\Games\Europa Universalis V'
+
+[[mods]]
+id = "test_mod"
+root = 'D:\Mods\Test Mod'
+
+[profiles]
+merged_default = ["vanilla", "test_mod"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = LoadOrderConfig.load(path)
+
+    assert config.vanilla_root == Path("/mnt/c/Games/Europa Universalis V")
+    assert config.mods["test_mod"].root == Path("/mnt/d/Mods/Test Mod")
+
+
 def test_mod_file_override_and_database_entry_modes(tmp_path: Path) -> None:
     load_order = _load_order_file(tmp_path)
     data = load_building_data(profile="merged_default", load_order_path=load_order)

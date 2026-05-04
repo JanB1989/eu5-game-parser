@@ -12,6 +12,18 @@ from eu5gameparser.clausewitz.syntax import CEntry, CList, Value
 from eu5gameparser.domain.buildings import BuildingData
 from eu5gameparser.domain.eu5 import Eu5Data, load_eu5_data
 from eu5gameparser.load_order import DEFAULT_LOAD_ORDER_PATH
+from eu5gameparser.savegame.extended import (
+    EXTENDED_TARGET_SECTIONS,
+    empty_extended_tables,
+    extended_tables_from_root,
+)
+from eu5gameparser.savegame.hierarchy import load_location_hierarchy
+from eu5gameparser.savegame.references import (
+    REFERENCE_TARGET_SECTIONS,
+    SaveReferenceMaps,
+    extract_reference_maps,
+    reference_maps_from_root,
+)
 
 DEFAULT_SAVE_GAMES_DIR = Path(
     r"C:\Users\Anwender\Documents\Paradox Interactive\Europa Universalis V\save games"
@@ -30,6 +42,9 @@ POP_TYPES = (
 )
 POP_EMPLOYED_COLUMNS = tuple(f"employed_{pop_type}" for pop_type in POP_TYPES)
 POP_UNEMPLOYED_COLUMNS = tuple(f"unemployed_{pop_type}" for pop_type in POP_TYPES)
+POP_TOTAL_COLUMNS = tuple(f"population_{pop_type}" for pop_type in POP_TYPES) + (
+    "population_unknown",
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +62,15 @@ class SavegameTables:
     production_method_population_flows: pl.DataFrame
     market_population_pools: pl.DataFrame
     accounting_checks: pl.DataFrame
+    countries: pl.DataFrame
+    population: pl.DataFrame
+    provinces: pl.DataFrame
+    cultures: pl.DataFrame
+    religions: pl.DataFrame
+    estates: pl.DataFrame
+    loans: pl.DataFrame
+    characters: pl.DataFrame
+    dynasties: pl.DataFrame
 
     def as_dict(self) -> dict[str, pl.DataFrame]:
         return {
@@ -63,6 +87,15 @@ class SavegameTables:
             "production_method_population_flows": self.production_method_population_flows,
             "market_population_pools": self.market_population_pools,
             "accounting_checks": self.accounting_checks,
+            "countries": self.countries,
+            "population": self.population,
+            "provinces": self.provinces,
+            "cultures": self.cultures,
+            "religions": self.religions,
+            "estates": self.estates,
+            "loans": self.loans,
+            "characters": self.characters,
+            "dynasties": self.dynasties,
         }
 
 
@@ -97,6 +130,7 @@ def write_savegame_parquet(
     load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
     force_rakaly: bool = False,
     eu5_data: Eu5Data | None = None,
+    include_extended: bool = False,
 ) -> SavegameTables:
     tables = load_savegame_tables(
         save_path=save_path,
@@ -105,6 +139,7 @@ def write_savegame_parquet(
         load_order_path=load_order_path,
         force_rakaly=force_rakaly,
         eu5_data=eu5_data,
+        include_extended=include_extended,
     )
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -121,15 +156,26 @@ def load_savegame_tables(
     load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
     force_rakaly: bool = False,
     eu5_data: Eu5Data | None = None,
+    include_extended: bool = False,
 ) -> SavegameTables:
     resolved_save = _resolve_save_path(save_path, save_dir)
     if force_rakaly or not is_text_save(resolved_save):
         root = _load_save_with_rakaly(resolved_save)
     else:
-        root = _load_text_save_sections(resolved_save)
+        root = _load_text_save_sections(
+            resolved_save,
+            optional_sections=EXTENDED_TARGET_SECTIONS if include_extended else frozenset(),
+        )
 
     eu5_data = eu5_data or load_eu5_data(profile=profile, load_order_path=load_order_path)
-    return _tables_from_root(resolved_save, root, eu5_data)
+    location_hierarchy = load_location_hierarchy(profile=profile, load_order_path=load_order_path)
+    return _tables_from_root(
+        resolved_save,
+        root,
+        eu5_data,
+        include_extended=include_extended,
+        location_hierarchy=location_hierarchy,
+    )
 
 
 def _resolve_save_path(save_path: str | Path | None, save_dir: str | Path) -> Path:
@@ -144,16 +190,37 @@ def _resolve_save_path(save_path: str | Path | None, save_dir: str | Path) -> Pa
     return latest
 
 
-def _load_text_save_sections(path: Path) -> dict[str, Any]:
+def _load_text_save_sections(
+    path: Path,
+    *,
+    optional_sections: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     if "\n" not in text:
         raise ValueError(f"Text save {path} has no SAV header terminator.")
     body = text.split("\n", 1)[1]
-    raw_sections = _extract_top_level_sections(body, TARGET_SECTIONS)
+    raw_sections = _extract_top_level_sections(
+        body,
+        TARGET_SECTIONS | optional_sections | REFERENCE_TARGET_SECTIONS,
+    )
     missing = sorted(TARGET_SECTIONS - raw_sections.keys())
     if missing:
         raise ValueError(f"Save {path} is missing required sections: {', '.join(missing)}")
-    return {key: _document_value(key, value, path) for key, value in raw_sections.items()}
+    sections: dict[str, Any] = {}
+    for key, value in raw_sections.items():
+        if key in REFERENCE_TARGET_SECTIONS and key not in optional_sections:
+            continue
+        if key in TARGET_SECTIONS:
+            sections[key] = _document_value(key, value, path)
+            continue
+        try:
+            sections[key] = _document_value(key, value, path)
+        except ValueError:
+            # Some large legacy-only sections contain save constructs the small
+            # Clausewitz parser does not need for core progression tables.
+            continue
+    sections["_reference_maps"] = extract_reference_maps(raw_sections)
+    return sections
 
 
 def _load_save_with_rakaly(path: Path) -> dict[str, Any]:
@@ -285,10 +352,26 @@ def _document_value(key: str, value: str, path: Path) -> CList:
     return document.entries[0].value
 
 
-def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> SavegameTables:
+def _tables_from_root(
+    path: Path,
+    root: dict[str, Any],
+    eu5_data: Eu5Data,
+    *,
+    include_extended: bool = False,
+    location_hierarchy: dict[str, dict[str, str | None]] | None = None,
+) -> SavegameTables:
     metadata = _metadata_row(path, root.get("metadata"))
     location_slugs = _location_slugs(root.get("metadata"))
-    locations = _locations_table(root.get("locations"), location_slugs)
+    references = _reference_maps_from_root(root)
+    locations = _locations_table(
+        root.get("locations"),
+        location_slugs,
+        population_sizes=references.population_sizes,
+        population=references.population,
+        countries=references.countries,
+        provinces=references.provinces,
+        location_hierarchy=location_hierarchy,
+    )
     location_market = _location_market_map(locations)
     location_slug = _location_slug_map(locations, location_slugs)
     markets, market_goods = _market_tables(
@@ -325,6 +408,7 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         market_goods,
         bucket_flows,
     )
+    extended = extended_tables_from_root(root) if include_extended else empty_extended_tables()
     return SavegameTables(
         save_metadata=pl.DataFrame([metadata], schema=_metadata_schema()),
         markets=markets,
@@ -339,6 +423,15 @@ def _tables_from_root(path: Path, root: dict[str, Any], eu5_data: Eu5Data) -> Sa
         production_method_population_flows=population_flows,
         market_population_pools=market_population_pools,
         accounting_checks=checks,
+        countries=extended["countries"],
+        population=extended["population"],
+        provinces=extended["provinces"],
+        cultures=extended["cultures"],
+        religions=extended["religions"],
+        estates=extended["estates"],
+        loans=extended["loans"],
+        characters=extended["characters"],
+        dynasties=extended["dynasties"],
     )
 
 
@@ -365,9 +458,161 @@ def _location_slugs(metadata: Any) -> dict[int, str]:
     return {index + 1: str(value) for index, value in enumerate(_list_scalars(locations))}
 
 
-def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.DataFrame:
+def _reference_maps_from_root(root: dict[str, Any]) -> SaveReferenceMaps:
+    existing = root.get("_reference_maps")
+    if isinstance(existing, SaveReferenceMaps):
+        return existing
+    population = _population_metadata_map(root.get("population"))
+    return reference_maps_from_root(
+        population_sizes={
+            item_id: data["size"]
+            for item_id, data in population.items()
+            if isinstance(data.get("size"), float)
+        },
+        population=population,
+        countries=_country_metadata_map(root.get("countries")),
+        provinces=_province_metadata_map(root.get("provinces")),
+    )
+
+
+def _population_size_map(population_root: Any) -> dict[int, float]:
+    return {
+        item_id: data["size"]
+        for item_id, data in _population_metadata_map(population_root).items()
+        if isinstance(data.get("size"), float)
+    }
+
+
+def _population_metadata_map(population_root: Any) -> dict[int, dict[str, str | float | None]]:
+    root = _as_block(population_root)
+    database = _as_block(_first(root, "database"))
+    result: dict[int, dict[str, str | float | None]] = {}
+    if database is None:
+        return result
+    for entry in database.entries:
+        pop_id = _to_int(entry.key)
+        data = _as_block(entry.value)
+        if pop_id is None or data is None:
+            continue
+        size = _to_float(_first(data, "size"))
+        pop_type = _scalar_string(_first(data, "type"))
+        result[pop_id] = {"type": pop_type, "size": size}
+    return result
+
+
+def _country_metadata_map(countries_root: Any) -> dict[int, dict[str, str | None]]:
+    root = _as_block(countries_root)
+    database = _as_block(_first(root, "database"))
+    result: dict[int, dict[str, str | None]] = {}
+    if database is None:
+        return result
+    for entry in database.entries:
+        country_id = _to_int(entry.key)
+        data = _as_block(entry.value)
+        if country_id is None or data is None:
+            continue
+        tag = (
+            _scalar_string(_first(data, "definition"))
+            or _scalar_string(_first(data, "tag"))
+            or _scalar_string(_first(data, "country_name"))
+            or _scalar_string(_first(data, "name"))
+        )
+        name = (
+            _scalar_string(_first(data, "country_name"))
+            or _scalar_string(_first(data, "name"))
+            or tag
+        )
+        result[country_id] = {"tag": tag, "name": name}
+    return result
+
+
+def _province_metadata_map(provinces_root: Any) -> dict[int, str | None]:
+    root = _as_block(provinces_root)
+    database = _as_block(_first(root, "database"))
+    result: dict[int, str | None] = {}
+    if database is None:
+        return result
+    for entry in database.entries:
+        province_id = _to_int(entry.key)
+        data = _as_block(entry.value)
+        if province_id is None or data is None:
+            continue
+        result[province_id] = _scalar_string(_first(data, "province_definition"))
+    return result
+
+
+def _country_fallback(country_id: int | None) -> str | None:
+    return f"Country #{country_id}" if country_id is not None else None
+
+
+def _location_population(location: CList, population_sizes: dict[int, float]) -> float | None:
+    direct_population = _to_float(_first(location, "population"))
+    if direct_population is not None:
+        return direct_population
+    population = _as_block(_first(location, "population"))
+    pops = _as_block(_first(population, "pops")) if population is not None else None
+    if pops is None:
+        return None
+    values = _list_scalars(pops)
+    if not values:
+        return None
+    if population_sizes:
+        total = 0.0
+        found = False
+        for value in values:
+            pop_id = _to_int(value)
+            if pop_id is not None and pop_id in population_sizes:
+                total += population_sizes[pop_id]
+                found = True
+        if found:
+            return total
+    return None
+
+
+def _location_population_by_type(
+    location: CList,
+    population: dict[int, dict[str, str | float | None]],
+) -> dict[str, float]:
+    amounts = {column: 0.0 for column in POP_TOTAL_COLUMNS}
+    direct_population = _to_float(_first(location, "population"))
+    if direct_population is not None:
+        amounts["population_unknown"] = direct_population
+        return amounts
+    population_block = _as_block(_first(location, "population"))
+    pops = _as_block(_first(population_block, "pops")) if population_block is not None else None
+    if pops is None or not population:
+        return amounts
+    for value in _list_scalars(pops):
+        pop_id = _to_int(value)
+        data = population.get(pop_id or -1)
+        if data is None:
+            continue
+        size = data.get("size")
+        if not isinstance(size, (int, float)):
+            continue
+        pop_type = data.get("type")
+        column = f"population_{pop_type}" if pop_type in POP_TYPES else "population_unknown"
+        amounts[column] += float(size)
+    return amounts
+
+
+def _locations_table(
+    locations_root: Any,
+    location_slugs: dict[int, str],
+    *,
+    population_sizes: dict[int, float] | None = None,
+    population: dict[int, dict[str, str | float | None]] | None = None,
+    countries: dict[int, dict[str, str | None]] | None = None,
+    provinces: dict[int, str | None] | None = None,
+    location_hierarchy: dict[str, dict[str, str | None]] | None = None,
+) -> pl.DataFrame:
     root = _as_block(locations_root)
     locations = _as_block(_first(root, "locations"))
+    population_sizes = population_sizes or {}
+    population = population or {}
+    countries = countries or {}
+    provinces = provinces or {}
+    location_hierarchy = location_hierarchy or {}
     rows: list[dict[str, Any]] = []
     if locations is not None:
         for entry in locations.entries:
@@ -377,19 +622,41 @@ def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.
             location_id = _to_int(entry.key)
             if location_id is None:
                 continue
+            owner_id = _to_int(_first(data, "owner"))
+            controller_id = _to_int(_first(data, "controller"))
+            province_id = _to_int(_first(data, "province"))
             rgo_employed_by_pop = _rgo_employed_by_pop(data)
             unemployed_by_pop = _unemployed_by_pop(data)
+            population_by_type = _location_population_by_type(data, population)
+            owner = countries.get(owner_id or -1, {})
+            controller = countries.get(controller_id or -1, {})
+            slug = location_slugs.get(location_id)
+            hierarchy = location_hierarchy.get(slug or "", {})
             rows.append(
                 {
                     "location_id": location_id,
-                    "slug": location_slugs.get(location_id),
-                    "owner": _to_int(_first(data, "owner")),
-                    "controller": _to_int(_first(data, "controller")),
+                    "slug": slug,
+                    "owner": owner_id,
+                    "controller": controller_id,
+                    "owner_country_id": owner_id,
+                    "country_tag": owner.get("tag") or _country_fallback(owner_id),
+                    "owner_name": owner.get("name") or _country_fallback(owner_id),
+                    "controller_country_id": controller_id,
+                    "controller_tag": controller.get("tag") or _country_fallback(controller_id),
                     "market_id": _to_int(_first(data, "market")),
                     "second_best_market_id": _to_int(_first(data, "second_best_market")),
-                    "province": _to_int(_first(data, "province")),
+                    "province": province_id,
+                    "province_slug": hierarchy.get("province_slug")
+                    or provinces.get(province_id or -1),
+                    "area": hierarchy.get("area"),
+                    "region": hierarchy.get("region"),
+                    "macro_region": hierarchy.get("macro_region"),
+                    "super_region": hierarchy.get("super_region"),
                     "development": _to_float(_first(data, "development")),
                     "control": _to_float(_first(data, "control")),
+                    "tax": _to_float(_first(data, "tax")),
+                    "possible_tax": _to_float(_first(data, "possible_tax")),
+                    "total_population": _location_population(data, population_sizes),
                     "rank": _scalar_string(_first(data, "rank")),
                     "raw_material": _scalar_string(_first(data, "raw_material")),
                     "max_raw_material_workers": _to_float(
@@ -397,6 +664,7 @@ def _locations_table(locations_root: Any, location_slugs: dict[int, str]) -> pl.
                     ),
                     "rgo_employed": sum(rgo_employed_by_pop.values()),
                     "unemployed_total": sum(unemployed_by_pop.values()),
+                    **population_by_type,
                     **_pop_columns(rgo_employed_by_pop),
                     **_unemployed_pop_columns(unemployed_by_pop),
                 }
@@ -1513,17 +1781,31 @@ def _locations_schema() -> dict[str, Any]:
         "slug": pl.String,
         "owner": pl.Int64,
         "controller": pl.Int64,
+        "owner_country_id": pl.Int64,
+        "country_tag": pl.String,
+        "owner_name": pl.String,
+        "controller_country_id": pl.Int64,
+        "controller_tag": pl.String,
         "market_id": pl.Int64,
         "second_best_market_id": pl.Int64,
         "province": pl.Int64,
+        "province_slug": pl.String,
+        "area": pl.String,
+        "region": pl.String,
+        "macro_region": pl.String,
+        "super_region": pl.String,
         "development": pl.Float64,
         "control": pl.Float64,
+        "tax": pl.Float64,
+        "possible_tax": pl.Float64,
+        "total_population": pl.Float64,
         "rank": pl.String,
         "raw_material": pl.String,
         "max_raw_material_workers": pl.Float64,
         "rgo_employed": pl.Float64,
         "unemployed_total": pl.Float64,
     }
+    schema.update({column: pl.Float64 for column in POP_TOTAL_COLUMNS})
     schema.update({column: pl.Float64 for column in POP_EMPLOYED_COLUMNS})
     schema.update({column: pl.Float64 for column in POP_UNEMPLOYED_COLUMNS})
     return schema

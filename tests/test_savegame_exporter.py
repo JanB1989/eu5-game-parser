@@ -293,9 +293,29 @@ def test_write_savegame_parquet_writes_all_tables(tmp_path: Path) -> None:
         "production_method_population_flows",
         "market_population_pools",
         "accounting_checks",
+        "countries",
+        "population",
+        "provinces",
+        "cultures",
+        "religions",
+        "estates",
+        "loans",
+        "characters",
+        "dynasties",
     }
     assert {path.stem for path in output.glob("*.parquet")} == expected
-    for name in expected:
+    core_expected = expected - {
+        "countries",
+        "population",
+        "provinces",
+        "cultures",
+        "religions",
+        "estates",
+        "loans",
+        "characters",
+        "dynasties",
+    }
+    for name in core_expected:
         assert pl.read_parquet(output / f"{name}.parquet").height >= 1
 
 
@@ -343,6 +363,12 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "function selectedPopulationPool" in html
     assert "function renderDesignationLabourSummary" in html
     assert "function designationLabourRows" in html
+    assert "function enhanceSearchInput" in html
+    assert "suppressNextSelect" in html
+    assert "pickerClick" in html
+    assert 'event.key === "Enter"' in html
+    assert 'event.key === "Escape"' in html
+    assert "input.select()" in html
     assert 'id="designationLabourSummary"' in html
     assert "designation-labour-summary" in html
     assert '{ key: "designation", label: "Designation", numeric: false }' in html
