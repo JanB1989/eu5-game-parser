@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -24,28 +23,19 @@ from eu5gameparser.savegame import (
     DEFAULT_SAVE_GAMES_DIR,
     SavegameDataset,
     benchmark_savegame_progression,
+    build_savegame_notebook_dataset,
     ingest_savegame_dataset,
-    run_dashboard,
     watch_savegame_dataset,
     write_savegame_explorer_html,
     write_savegame_parquet,
     write_savegame_progression_html,
 )
-from eu5gameparser.savegame.dashboard_adapter import SavegameDashboardAdapter
-from eu5gameparser.savegame.dashboard_lifecycle import (
-    dashboard_status,
-    start_dashboard_process,
-    stop_dashboard_process,
-)
 
 app = typer.Typer(help="Parse Europa Universalis V game files.")
 savegame_app = typer.Typer(help="Parse and analyze EU5 savegames.")
-dashboard_app = typer.Typer(
-    help="Run the local savegame progression dashboard.",
-    invoke_without_command=True,
-)
+savegame_notebooks_app = typer.Typer(help="Build parquet datasets for savegame notebooks.")
 app.add_typer(savegame_app, name="savegame")
-app.add_typer(dashboard_app, name="dashboard")
+app.add_typer(savegame_notebooks_app, name="savegame-notebooks")
 
 
 class OutputFormat(StrEnum):
@@ -366,7 +356,7 @@ def savegame_benchmark(
     ] = DEFAULT_LOAD_ORDER_PATH,
     profile: Annotated[str, typer.Option(help="Data profile to parse.")] = "merged_default",
     workers: Annotated[int, typer.Option(help="Parallel save parser workers.")] = 1,
-    top_n: Annotated[int, typer.Option(help="Top entities to include in the dashboard.")] = 40,
+    top_n: Annotated[int, typer.Option(help="Top entities to include in progression HTML.")] = 40,
     force_rakaly: Annotated[
         bool,
         typer.Option(help="Force Rakaly/pyeu5 decoding instead of native text parsing."),
@@ -403,189 +393,42 @@ def savegame_benchmark(
     typer.echo(f"dataset_bytes: {result.report.get('dataset_bytes')}")
 
 
-@dashboard_app.callback()
-def dashboard(
-    ctx: typer.Context,
+@savegame_notebooks_app.command("build")
+def savegame_notebooks_build(
     dataset: Annotated[
         Path,
-        typer.Option(help="Progression dataset directory."),
-    ] = Path("out/savegame_progression/dataset"),
-    load_order: Annotated[
-        Path, typer.Option(help="Load-order TOML file.")
-    ] = DEFAULT_LOAD_ORDER_PATH,
-    profile: Annotated[
-        str,
-        typer.Option(help="Data profile to parse for game-data references."),
-    ] = "merged_default",
-    host: Annotated[str, typer.Option(help="Dashboard bind host.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Dashboard bind port.")] = 8050,
-    debug: Annotated[bool, typer.Option(help="Run Dash in debug mode.")] = False,
-    refresh_ms: Annotated[
-        int,
-        typer.Option(help="Browser refresh interval in milliseconds."),
-    ] = 5000,
-) -> None:
-    if ctx.invoked_subcommand is not None:
-        return
-    run_dashboard(
-        dataset,
-        profile=profile,
-        load_order_path=load_order,
-        host=host,
-        port=port,
-        debug=debug,
-        refresh_ms=refresh_ms,
-    )
-
-
-@dashboard_app.command("serve")
-def dashboard_serve(
-    dataset: Annotated[
-        Path,
-        typer.Option(help="Progression dataset directory."),
-    ] = Path("out/savegame_progression/dataset"),
-    load_order: Annotated[
-        Path, typer.Option(help="Load-order TOML file.")
-    ] = DEFAULT_LOAD_ORDER_PATH,
-    profile: Annotated[
-        str,
-        typer.Option(help="Data profile to parse for game-data references."),
-    ] = "merged_default",
-    host: Annotated[str, typer.Option(help="Dashboard bind host.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Dashboard bind port.")] = 8050,
-    debug: Annotated[bool, typer.Option(help="Run Dash in debug mode.")] = False,
-    refresh_ms: Annotated[
-        int,
-        typer.Option(help="Browser refresh interval in milliseconds."),
-    ] = 5000,
-) -> None:
-    run_dashboard(
-        dataset,
-        profile=profile,
-        load_order_path=load_order,
-        host=host,
-        port=port,
-        debug=debug,
-        refresh_ms=refresh_ms,
-    )
-
-
-@dashboard_app.command("benchmark")
-def dashboard_benchmark(
-    dataset: Annotated[
-        Path,
-        typer.Option(help="Progression dataset directory."),
+        typer.Option(help="Raw progression parquet dataset directory."),
     ] = Path("out/savegame_progression/dataset"),
     output: Annotated[
         Path,
-        typer.Option(help="Benchmark JSON report path."),
-    ] = Path("out/savegame_progression/dashboard_benchmark_report.json"),
-    load_order: Annotated[
-        Path, typer.Option(help="Load-order TOML file.")
-    ] = DEFAULT_LOAD_ORDER_PATH,
+        typer.Option(help="Notebook-ready parquet output directory."),
+    ] = Path("out/savegame_notebooks/data"),
+    no_overwrite: Annotated[
+        bool,
+        typer.Option(help="Keep existing notebook output files instead of replacing the directory."),
+    ] = False,
     profile: Annotated[
-        str,
-        typer.Option(help="Data profile to parse for game-data references."),
-    ] = "merged_default",
-) -> None:
-    peak_rss = _current_rss_bytes()
-    timings: dict[str, float] = {}
-
-    started = time.perf_counter()
-    adapter = SavegameDashboardAdapter(
-        dataset,
-        profile=profile,
-        load_order_path=load_order,
-    )
-    timings["startup_seconds"] = time.perf_counter() - started
-    peak_rss = max(peak_rss or 0, _current_rss_bytes() or 0) or None
-
-    for key, operation in [
-        ("metadata_seconds", adapter.template_metadata),
-        ("overview_seconds", adapter.overview),
-        (
-            "template_super_region_seconds",
-            lambda: adapter.template_query(
-                metric_key="population:pops",
-                scope="super_region",
-                limit=5,
-            ),
-        ),
-    ]:
-        phase_started = time.perf_counter()
-        operation()
-        timings[key] = time.perf_counter() - phase_started
-        peak_rss = max(peak_rss or 0, _current_rss_bytes() or 0) or None
-
-    report = {
-        "dataset": str(dataset),
-        "profile": profile,
-        "load_order": str(load_order),
-        "timings": timings,
-        "peak_rss_bytes": peak_rss,
-        "cache": adapter.cache_info(),
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    typer.echo(f"report: {output}")
-    typer.echo(f"startup_seconds: {timings['startup_seconds']:.3f}")
-    typer.echo(f"metadata_seconds: {timings['metadata_seconds']:.3f}")
-    typer.echo(f"template_super_region_seconds: {timings['template_super_region_seconds']:.3f}")
-    typer.echo(f"peak_rss_bytes: {peak_rss}")
-
-
-@dashboard_app.command("start")
-def dashboard_start(
-    dataset: Annotated[
+        str | None,
+        typer.Option(help="Load-order profile used to resolve readable labels."),
+    ] = None,
+    load_order: Annotated[
         Path,
-        typer.Option(help="Progression dataset directory."),
-    ] = Path("out/savegame_progression/dataset"),
-    load_order: Annotated[
-        Path, typer.Option(help="Load-order TOML file.")
+        typer.Option(help="Load-order TOML file used to resolve readable labels."),
     ] = DEFAULT_LOAD_ORDER_PATH,
-    profile: Annotated[
-        str,
-        typer.Option(help="Data profile to parse for game-data references."),
-    ] = "merged_default",
-    host: Annotated[str, typer.Option(help="Dashboard bind host.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Dashboard bind port.")] = 8050,
-    timeout: Annotated[float, typer.Option(help="Health-check timeout in seconds.")] = 20.0,
-    refresh_ms: Annotated[
-        int,
-        typer.Option(help="Browser refresh interval in milliseconds."),
-    ] = 5000,
 ) -> None:
-    info = start_dashboard_process(
-        dataset=dataset,
+    result = build_savegame_notebook_dataset(
+        dataset,
+        output,
+        overwrite=not no_overwrite,
         profile=profile,
         load_order_path=load_order,
-        host=host,
-        port=port,
-        timeout_seconds=timeout,
-        refresh_ms=refresh_ms,
     )
-    _print_dashboard_status(info)
-    if not info.healthy:
-        raise typer.Exit(1)
-
-
-@dashboard_app.command("stop")
-def dashboard_stop(
-    port: Annotated[int, typer.Option(help="Dashboard bind port.")] = 8050,
-) -> None:
-    info = stop_dashboard_process(port=port)
-    _print_dashboard_status(info)
-
-
-@dashboard_app.command("status")
-def dashboard_status_command(
-    host: Annotated[str, typer.Option(help="Dashboard bind host.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Dashboard bind port.")] = 8050,
-) -> None:
-    info = dashboard_status(host=host, port=port)
-    _print_dashboard_status(info)
-    if not info.healthy:
-        raise typer.Exit(1)
+    typer.echo(f"source: {result.source}")
+    typer.echo(f"wrote: {result.output}")
+    typer.echo(f"snapshots: {result.snapshots}")
+    typer.echo(f"facts: {sum(result.facts.values())}")
+    typer.echo(f"dimensions: {sum(result.dimensions.values())}")
+    typer.echo(f"seconds: {result.elapsed_seconds:.2f}")
 
 
 @app.command("goods-flow", hidden=True)
@@ -779,25 +622,6 @@ def _print_warnings(warnings: list[str]) -> None:
         typer.echo(f"- {warning}")
     if len(warnings) > 20:
         typer.echo(f"- ... {len(warnings) - 20} more")
-
-
-def _print_dashboard_status(info) -> None:
-    typer.echo(f"dashboard: {info.url}")
-    typer.echo(f"healthy: {info.healthy}")
-    typer.echo(f"running: {info.running}")
-    typer.echo(f"pid: {info.pid or ''}")
-    if info.dataset:
-        typer.echo(f"dataset: {info.dataset}")
-    typer.echo(f"log: {info.log_path}")
-    typer.echo(f"state: {info.state_path}")
-
-
-def _current_rss_bytes() -> int | None:
-    try:
-        import psutil
-    except ModuleNotFoundError:
-        return None
-    return psutil.Process().memory_info().rss
 
 
 def _csv_safe_table(table):
