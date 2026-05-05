@@ -1128,7 +1128,7 @@ def _building_population_flow_rows(
         ]
         if not methods:
             continue
-        employed_total = _building_basis(building)
+        employed_total = _building_population_basis(building)
         if abs(employed_total) <= FLOAT_TOLERANCE:
             continue
         weights = [
@@ -1431,7 +1431,7 @@ def _nominal_flow_rows(
         method = method_by_name.get(active["production_method"])
         if building is None or method is None or building.get("market_id") is None:
             continue
-        basis = _building_basis(building)
+        basis = _building_flow_basis(building)
         level_sum = float(building.get("level") or 0.0)
         common = {
             "market_id": building["market_id"],
@@ -1475,14 +1475,20 @@ def _nominal_flow_rows(
     return rows
 
 
-def _building_basis(building: dict[str, Any]) -> float:
-    level = building.get("level") or 0.0
+def _building_flow_basis(building: dict[str, Any]) -> float:
     employment = building.get("employed")
     if employment is None:
         employment = building.get("employment")
+    if employment is not None:
+        return float(employment)
+    return float(building.get("level") or 0.0)
+
+
+def _building_population_basis(building: dict[str, Any]) -> float:
+    employment = building.get("employed")
     if employment is None:
-        employment = 1.0
-    return float(level) * float(employment)
+        employment = building.get("employment")
+    return 0.0 if employment is None else float(employment)
 
 
 def _rgo_employed_by_pop(location: CList) -> dict[str, float]:

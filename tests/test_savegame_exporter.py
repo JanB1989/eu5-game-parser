@@ -273,6 +273,82 @@ def test_population_flow_value_split_uses_one_third_two_thirds() -> None:
     assert high["employed_laborers"] == pytest.approx(2.0 / 3.0)
 
 
+def test_building_employed_value_is_not_multiplied_by_level() -> None:
+    population = _population_flow_for_building(level=3.0, employed=2.0)
+
+    row = population.row(0, named=True)
+    assert row["employed_total"] == pytest.approx(2.0)
+    assert row["employed_laborers"] == pytest.approx(2.0)
+
+
+def test_building_without_saved_employment_does_not_create_population_flow() -> None:
+    population = _population_flow_for_building(level=3.0, employed=None)
+
+    assert population.is_empty()
+
+
+def _population_flow_for_building(*, level: float, employed: float | None) -> pl.DataFrame:
+    building_data = BuildingData(
+        categories=pl.DataFrame(),
+        buildings=pl.DataFrame(
+            [{"name": "test_workshop", "pop_type": "laborers"}],
+            schema={"name": pl.String, "pop_type": pl.String},
+        ),
+        production_methods=pl.DataFrame(
+            [{"name": "test_method", "produced": "widgets", "output": 1.0}],
+            schema={"name": pl.String, "produced": pl.String, "output": pl.Float64},
+        ),
+        goods_flow_nodes=pl.DataFrame(),
+        goods_flow_edges=pl.DataFrame(),
+        unresolved_production_methods=pl.DataFrame(),
+        duplicate_production_methods=pl.DataFrame(),
+    )
+    buildings = pl.DataFrame(
+        [
+            {
+                "building_id": 1,
+                "building_type": "test_workshop",
+                "location_id": 10,
+                "location_slug": "test_location",
+                "market_id": 7,
+                "level": level,
+                "employed": employed,
+            }
+        ],
+        schema={
+            "building_id": pl.Int64,
+            "building_type": pl.String,
+            "location_id": pl.Int64,
+            "location_slug": pl.String,
+            "market_id": pl.Int64,
+            "level": pl.Float64,
+            "employed": pl.Float64,
+        },
+    )
+    building_methods = pl.DataFrame(
+        [
+            {
+                "building_id": 1,
+                "building_type": "test_workshop",
+                "location_id": 10,
+                "location_slug": "test_location",
+                "market_id": 7,
+                "production_method": "test_method",
+            }
+        ]
+    )
+    market_goods = pl.DataFrame(
+        [{"market_id": 7, "good_id": "widgets", "price": 1.0, "default_price": 1.0}]
+    )
+    return _population_flow_table(
+        building_data,
+        pl.DataFrame(),
+        buildings,
+        building_methods,
+        market_goods,
+    )
+
+
 def test_write_savegame_parquet_writes_all_tables(tmp_path: Path) -> None:
     data = _fixture_eu5_data(tmp_path)
     output = tmp_path / "savegame"
