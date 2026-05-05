@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-from eu5gameparser.savegame.dashboard import create_dashboard_app, run_dashboard
-from eu5gameparser.savegame.dashboard_adapter import (
-    BuildingIconResolver,
-    SavegameDashboardAdapter,
-)
 from eu5gameparser.savegame.dataset import (
     SavegameDataset,
     benchmark_savegame_progression,
@@ -25,16 +20,26 @@ from eu5gameparser.savegame.exporter import (
     write_savegame_parquet,
 )
 from eu5gameparser.savegame.html import write_savegame_explorer_html
+from eu5gameparser.savegame.notebook_dataset import (
+    NotebookBuildResult,
+    SavegameNotebookDataset,
+    build_savegame_notebook_dataset,
+    rank_groups,
+)
+from eu5gameparser.savegame import notebook_analysis
+from eu5gameparser.savegame import notebook_workbench
 from eu5gameparser.savegame.progression_html import write_savegame_progression_html
 
 __all__ = [
     "DEFAULT_SAVE_GAMES_DIR",
     "SavegameTables",
     "SavegameDataset",
-    "BuildingIconResolver",
-    "SavegameDashboardAdapter",
+    "SavegameNotebookDataset",
+    "NotebookBuildResult",
+    "notebook_analysis",
+    "notebook_workbench",
     "benchmark_savegame_progression",
-    "create_dashboard_app",
+    "build_savegame_notebook_dataset",
     "discover_playthroughs",
     "ingest_savegame_dataset",
     "is_text_save",
@@ -42,7 +47,7 @@ __all__ = [
     "load_savegame_tables",
     "parse_ingame_date",
     "playthrough_id_from_path",
-    "run_dashboard",
+    "rank_groups",
     "scan_for_work",
     "select_sample_saves",
     "watch_savegame_dataset",
