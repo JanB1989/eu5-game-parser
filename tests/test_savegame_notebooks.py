@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import polars as pl
+import pytest
 from typer.testing import CliRunner
 
 from eu5gameparser.cli import app
@@ -91,6 +92,50 @@ def test_notebook_builder_compacts_snapshot_tables_and_defaults_latest_playthrou
     assert facts.schema["price"] == pl.Float32
 
 
+def test_raw_notebook_dataset_reads_manifest_tables_and_dimensions(tmp_path: Path) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(
+        source,
+        [
+            _manifest_row("aaa", "s1", mtime_ns=10),
+            _manifest_row("aaa", "s2", mtime_ns=20, year=1342),
+        ],
+    )
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s2",
+        [_market_good("aaa", "s2", 1342, 1, "london", "iron", 7, 9, 3)],
+    )
+
+    dataset = SavegameNotebookDataset(source)
+
+    assert dataset.is_raw is True
+    assert dataset.snapshots().select("snapshot_id", "date_sort").to_dicts() == [
+        {"snapshot_id": "s1", "date_sort": 13370101},
+        {"snapshot_id": "s2", "date_sort": 13420101},
+    ]
+    assert set(dataset.dim("goods").get_column("good_id").to_list()) == {"grain", "iron"}
+    facts = dataset.scan_fact("market_goods", playthrough_id="aaa", good_id="grain").collect()
+    assert facts.height == 1
+    assert facts.item(0, "date_sort") == 13370101
+    assert "good_code" in facts.columns
+    assert "market_code" in facts.columns
+    assert "good_id" not in facts.columns
+
+    goods = ana.goods_global_time_series(dataset, playthrough_id="aaa", goods=["grain"]).collect()
+    assert goods.item(0, "good_label") == "Grain"
+    assert goods.item(0, "net") == 2.0
+
+
 def test_notebook_builder_writes_readable_labels_from_load_order(tmp_path: Path) -> None:
     source = tmp_path / "dataset"
     _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
@@ -175,7 +220,9 @@ def test_notebook_builder_writes_readable_labels_from_load_order(tmp_path: Path)
 
     assert dataset.dim("goods").item(0, "good_label") == "Fancy Grain"
     assert dataset.dim("building_types").item(0, "building_label") == "Bake House"
-    assert dataset.dim("production_methods").item(0, "production_method_label") == "Bake House Packing"
+    assert (
+        dataset.dim("production_methods").item(0, "production_method_label") == "Bake House Packing"
+    )
     assert dataset.dim("locations").item(0, "location_label") == "London"
     assert dataset.dim("locations").item(0, "region_label") == "England"
     assert dataset.dim("markets").item(0, "market_label") == "London"
@@ -322,7 +369,9 @@ def test_analysis_helpers_scope_overlapping_playthroughs_and_location_stats(tmp_
     _write_location_snapshot(source, "bbb", "b1", 1337, [("north", 1000.0), ("south", 1000.0)])
     _write_location_snapshot(source, "bbb", "b2", 1342, [("north", 2000.0), ("south", 2000.0)])
 
-    dataset = SavegameNotebookDataset(build_savegame_notebook_dataset(source, tmp_path / "out").output)
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(source, tmp_path / "out").output
+    )
 
     assert ana.search_dimension(dataset, "regions", "north").item(0, "region") == "north"
     assert ana.resolve_codes(dataset, "regions", query="north") == [0]
@@ -423,7 +472,9 @@ def test_analysis_goods_market_and_food_helpers(tmp_path: Path) -> None:
         ],
     )
 
-    dataset = SavegameNotebookDataset(build_savegame_notebook_dataset(source, tmp_path / "out").output)
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(source, tmp_path / "out").output
+    )
 
     goods = ana.goods_global_time_series(dataset, playthrough_id="aaa", goods=["grain"]).collect()
     assert goods.filter(pl.col("date_sort") == 13370101).item(0, "net") == -5.0
@@ -434,7 +485,9 @@ def test_analysis_goods_market_and_food_helpers(tmp_path: Path) -> None:
     assert zero_demand is None
 
     buckets = ana.goods_imbalance_buckets(dataset, playthrough_id="aaa", bucket_years=25).collect()
-    grain_bucket = buckets.filter(pl.col("good_id") == "grain").select("supply", "demand", "net").row(0)
+    grain_bucket = (
+        buckets.filter(pl.col("good_id") == "grain").select("supply", "demand", "net").row(0)
+    )
     assert grain_bucket == (65.0, 40.0, 25.0)
     assert set(buckets["good_id"].to_list()) == {"grain", "iron", "spice"}
     assert buckets.item(0, "good_id") == "grain"
@@ -447,7 +500,9 @@ def test_analysis_goods_market_and_food_helpers(tmp_path: Path) -> None:
     assert by_market_cap.item(0, "good_id") == "spice"
 
     proxy = ana.market_flow_proxy(dataset, playthrough_id="aaa", group_by="good").collect()
-    grain_proxy = proxy.filter((pl.col("date_sort") == 13420101) & (pl.col("good_label") == "Grain"))
+    grain_proxy = proxy.filter(
+        (pl.col("date_sort") == 13420101) & (pl.col("good_label") == "Grain")
+    )
     assert grain_proxy.item(0, "flow_value") == 100.0
     assert grain_proxy.item(0, "year") == 1342
 
@@ -522,7 +577,9 @@ def test_analysis_goods_flows_and_pm_values(tmp_path: Path) -> None:
         ],
     )
 
-    dataset = SavegameNotebookDataset(build_savegame_notebook_dataset(source, tmp_path / "out").output)
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(source, tmp_path / "out").output
+    )
 
     sources = ana.good_flow_breakdown(
         dataset,
@@ -556,7 +613,9 @@ def test_analysis_goods_flows_and_pm_values(tmp_path: Path) -> None:
     assert values["default_value"].sum() == 7.5
 
 
-def test_good_consumption_helpers_combine_bucket_and_pm_flows_and_filter_market(tmp_path: Path) -> None:
+def test_good_consumption_helpers_combine_bucket_and_pm_flows_and_filter_market(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "dataset"
     _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
     _write_table(
@@ -597,7 +656,9 @@ def test_good_consumption_helpers_combine_bucket_and_pm_flows_and_filter_market(
         [_pm_flow("aaa", "s1", "input", 2.0)],
     )
 
-    dataset = SavegameNotebookDataset(build_savegame_notebook_dataset(source, tmp_path / "out").output)
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(source, tmp_path / "out").output
+    )
 
     global_consumption = ana.good_consumption_latest(
         dataset,
@@ -605,8 +666,16 @@ def test_good_consumption_helpers_combine_bucket_and_pm_flows_and_filter_market(
         playthrough_id="aaa",
         group_by="bucket",
     ).collect()
-    assert global_consumption.filter(pl.col("consumption_label") == "Building").item(0, "amount") == 11.0
-    assert global_consumption.filter(pl.col("consumption_label") == "PM input: Pm Bake").item(0, "amount") == 2.0
+    assert (
+        global_consumption.filter(pl.col("consumption_label") == "Building").item(0, "amount")
+        == 11.0
+    )
+    assert (
+        global_consumption.filter(pl.col("consumption_label") == "PM input: Pm Bake").item(
+            0, "amount"
+        )
+        == 2.0
+    )
 
     london_consumption = ana.good_consumption_latest(
         dataset,
@@ -615,7 +684,10 @@ def test_good_consumption_helpers_combine_bucket_and_pm_flows_and_filter_market(
         group_by="bucket",
         market_query="london",
     ).collect()
-    assert london_consumption.filter(pl.col("consumption_label") == "Building").item(0, "amount") == 6.0
+    assert (
+        london_consumption.filter(pl.col("consumption_label") == "Building").item(0, "amount")
+        == 6.0
+    )
     assert london_consumption["amount"].sum() == 8.0
 
     by_market = ana.good_consumption_over_time(
@@ -713,14 +785,24 @@ def test_analysis_building_and_pm_helpers(tmp_path: Path, monkeypatch) -> None:
         group_by=["building_type", "region"],
         building_query="bakery",
     ).collect()
-    assert levels.filter((pl.col("date_sort") == 13420101) & (pl.col("region_label") == "North")).item(0, "level") == 4.0
+    assert (
+        levels.filter((pl.col("date_sort") == 13420101) & (pl.col("region_label") == "North")).item(
+            0, "level"
+        )
+        == 4.0
+    )
 
     adoption = ana.pm_adoption_over_time(
         dataset,
         playthrough_id="aaa",
         building_query="bakery",
     ).collect()
-    assert adoption.filter((pl.col("date_sort") == 13420101) & (pl.col("production_method_label") == "Pm Bake 2")).item(0, "share") == 0.5
+    assert (
+        adoption.filter(
+            (pl.col("date_sort") == 13420101) & (pl.col("production_method_label") == "Pm Bake 2")
+        ).item(0, "share")
+        == 0.5
+    )
     assert adoption.filter(pl.col("date_sort") == 13420101).item(0, "year") == 1342
 
     regional = ana.pm_regional_preferences(
@@ -728,7 +810,12 @@ def test_analysis_building_and_pm_helpers(tmp_path: Path, monkeypatch) -> None:
         playthrough_id="aaa",
         building_query="bakery",
     ).collect()
-    assert regional.filter((pl.col("region_label") == "South") & (pl.col("production_method_label") == "Pm Bake 2")).item(0, "share") == 1.0
+    assert (
+        regional.filter(
+            (pl.col("region_label") == "South") & (pl.col("production_method_label") == "Pm Bake 2")
+        ).item(0, "share")
+        == 1.0
+    )
 
     slot_latest = ana.pm_slot_distribution_latest(
         dataset,
@@ -736,7 +823,10 @@ def test_analysis_building_and_pm_helpers(tmp_path: Path, monkeypatch) -> None:
         building_query="bakery",
     ).collect()
     assert slot_latest.filter(pl.col("slot_label") == "Slot 1").item(0, "share") == 1.0
-    assert slot_latest.filter(pl.col("slot_label") == "Slot 2").item(0, "production_method_label") == "Pm Bake 2"
+    assert (
+        slot_latest.filter(pl.col("slot_label") == "Slot 2").item(0, "production_method_label")
+        == "Pm Bake 2"
+    )
 
     slot_ts = ana.pm_slot_distribution_over_time(
         dataset,
@@ -842,7 +932,36 @@ def test_workbench_pm_slot_views_ignore_pm_drilldown_search(tmp_path: Path, monk
         (pl.col("date_sort") == 13420101) & (pl.col("slot_label") == "Slot 1")
     )
     assert slot_one["share"].to_list() == [0.5, 0.5]
-    assert {"slot_label", "macro_region_label", "production_method_label"}.issubset(result.pm_preferences.columns)
+    assert {"slot_label", "macro_region_label", "production_method_label"}.issubset(
+        result.pm_preferences.columns
+    )
+
+
+def test_workbench_opens_raw_dataset_when_load_order_path_is_missing(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "graphs" / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    (tmp_path / "constructor.toml").write_text('name = "test"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    workbench = wb.open_workbench(
+        wb.WorkbenchConfig(
+            load_order_path=tmp_path / "missing.load_order.toml",
+            good_search="grain",
+            building_search=None,
+            country_search=None,
+        )
+    )
+
+    assert workbench.dataset.is_raw is True
+    assert workbench.snapshots.height == 1
+    assert workbench.good_id == "grain"
 
 
 def test_notebook_builder_adds_unslotted_pm_metadata_without_profile(tmp_path: Path) -> None:
@@ -856,7 +975,9 @@ def test_notebook_builder_adds_unslotted_pm_metadata_without_profile(tmp_path: P
         [_building_method("aaa", "s1", 1337, 1, 10, "bakery", "pm_bake")],
     )
 
-    dataset = SavegameNotebookDataset(build_savegame_notebook_dataset(source, tmp_path / "out").output)
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(source, tmp_path / "out").output
+    )
 
     methods = dataset.dim("production_methods")
     assert methods.item(0, "slot_label") == "Unslotted"
@@ -883,6 +1004,219 @@ def test_savegame_notebooks_build_cli(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "snapshots: 1" in result.output
     assert (output / "snapshots.parquet").is_file()
+
+
+def test_notebook_builder_replaces_existing_output_from_staging(tmp_path: Path) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    output = tmp_path / "out"
+    build_savegame_notebook_dataset(source, output)
+
+    _write_manifest(
+        source,
+        [
+            _manifest_row("aaa", "s1", mtime_ns=10),
+            _manifest_row("bbb", "s2", mtime_ns=20),
+        ],
+    )
+    _write_table(
+        source,
+        "market_goods",
+        "bbb",
+        "s2",
+        [_market_good("bbb", "s2", 1338, 2, "paris", "iron", 7, 9, 3)],
+    )
+
+    result = build_savegame_notebook_dataset(source, output)
+
+    assert result.status == "rebuilt"
+    assert SavegameNotebookDataset(output).snapshots().get_column("snapshot_id").to_list() == [
+        "s1",
+        "s2",
+    ]
+
+
+def test_notebook_builder_retries_transient_staged_output_rename(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    output = tmp_path / "out"
+    build_savegame_notebook_dataset(source, output)
+
+    _write_manifest(
+        source,
+        [
+            _manifest_row("aaa", "s1", mtime_ns=10),
+            _manifest_row("bbb", "s2", mtime_ns=20),
+        ],
+    )
+    _write_table(
+        source,
+        "market_goods",
+        "bbb",
+        "s2",
+        [_market_good("bbb", "s2", 1338, 2, "paris", "iron", 7, 9, 3)],
+    )
+
+    original_rename = Path.rename
+    failures = {"count": 0}
+
+    def flaky_rename(path: Path, target: Path) -> Path:
+        if path.name.startswith(".out.tmp") and Path(target).name == "out" and not failures["count"]:
+            failures["count"] += 1
+            raise PermissionError("transient busy directory")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+
+    result = build_savegame_notebook_dataset(source, output)
+
+    assert result.status == "rebuilt"
+    assert failures["count"] == 1
+    assert SavegameNotebookDataset(output).snapshots().get_column("snapshot_id").to_list() == [
+        "s1",
+        "s2",
+    ]
+
+
+def test_notebook_builder_keeps_new_output_when_old_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    output = tmp_path / "out"
+    (output / "facts").mkdir(parents=True)
+    (output / "dims").mkdir()
+    (output / "metadata.json").write_text('{"snapshots": 99}\n', encoding="utf-8")
+
+    def fail_rmtree(path: Path) -> None:
+        raise OSError(f"busy: {path}")
+
+    monkeypatch.setattr(notebook_dataset.shutil, "rmtree", fail_rmtree)
+
+    result = build_savegame_notebook_dataset(source, output)
+
+    assert result.snapshots == 1
+    assert result.warnings
+    assert SavegameNotebookDataset(output).snapshots().get_column("snapshot_id").to_list() == ["s1"]
+
+
+def test_notebook_builder_leaves_existing_output_when_staged_build_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    output = tmp_path / "out"
+    build_savegame_notebook_dataset(source, output)
+
+    def fail_write_facts(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(notebook_dataset, "_write_facts", fail_write_facts)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        build_savegame_notebook_dataset(source, output)
+
+    assert SavegameNotebookDataset(output).snapshots().get_column("snapshot_id").to_list() == ["s1"]
+
+
+def test_notebook_builder_skips_when_metadata_matches_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    output = tmp_path / "out"
+    build_savegame_notebook_dataset(source, output)
+
+    def fail_write_facts(*args, **kwargs):
+        raise RuntimeError("should have skipped")
+
+    monkeypatch.setattr(notebook_dataset, "_write_facts", fail_write_facts)
+
+    result = build_savegame_notebook_dataset(source, output, skip_if_current=True)
+
+    assert result.status == "up-to-date"
+    assert result.snapshots == 1
+
+
+def test_notebook_builder_ignores_manifest_rows_missing_from_active_save_dir(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "dataset"
+    save_dir = tmp_path / "save games"
+    save_dir.mkdir()
+    active_save = save_dir / "s2.eu5"
+    active_save.write_text("save\n", encoding="utf-8")
+    stale_save = save_dir / "s1.eu5"
+    stale = _manifest_row("aaa", "s1", mtime_ns=10)
+    stale["path"] = str(stale_save)
+    stale["source_path"] = str(stale_save)
+    active = _manifest_row("bbb", "s2", mtime_ns=20)
+    active["path"] = str(active_save)
+    active["source_path"] = str(active_save)
+    _write_manifest(source, [stale, active])
+    _write_table(
+        source,
+        "market_goods",
+        "aaa",
+        "s1",
+        [_market_good("aaa", "s1", 1337, 1, "london", "grain", 10, 8, 2)],
+    )
+    _write_table(
+        source,
+        "market_goods",
+        "bbb",
+        "s2",
+        [_market_good("bbb", "s2", 1338, 2, "paris", "iron", 7, 9, 3)],
+    )
+
+    result = build_savegame_notebook_dataset(source, tmp_path / "out", active_save_dir=save_dir)
+    dataset = SavegameNotebookDataset(result.output)
+
+    assert result.stale_snapshots_ignored == 1
+    assert dataset.snapshots().get_column("snapshot_id").to_list() == ["s2"]
+    facts = dataset.scan_fact("market_goods").collect()
+    assert facts.get_column("playthrough_id").to_list() == ["bbb"]
 
 
 def _manifest_row(

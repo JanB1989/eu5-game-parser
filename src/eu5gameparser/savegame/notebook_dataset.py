@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import time
 from collections.abc import Iterable, Sequence
@@ -17,7 +19,6 @@ from eu5gameparser.savegame.notebook_labels import (
     NotebookLabelResolver,
     enrich_notebook_dimensions,
 )
-
 
 NOTEBOOK_SCHEMA_VERSION = 1
 FACT_TABLES = (
@@ -348,15 +349,42 @@ class NotebookBuildResult:
     dimensions: dict[str, int]
     snapshots: int
     elapsed_seconds: float
+    status: str = "rebuilt"
+    stale_snapshots_ignored: int = 0
+    manifest_fingerprint: str | None = None
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ManifestSelection:
+    frame: pl.DataFrame
+    total_snapshots: int
+    stale_snapshots_ignored: int
+    active_save_dir: Path | None
 
 
 class SavegameNotebookDataset:
-    def __init__(self, root: str | Path):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        profile: str | DataProfile | None = None,
+        load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
+        active_save_dir: str | Path | None = None,
+    ):
         self.root = Path(root)
+        self.profile = profile
+        self.load_order_path = load_order_path
+        self.active_save_dir = active_save_dir
+        self._dimension_cache: dict[str, pl.DataFrame] | None = None
 
     @property
     def facts_root(self) -> Path:
         return self.root / "facts"
+
+    @property
+    def raw_tables_root(self) -> Path:
+        return self.root / "tables"
 
     @property
     def dims_root(self) -> Path:
@@ -366,7 +394,20 @@ class SavegameNotebookDataset:
     def snapshots_path(self) -> Path:
         return self.root / "snapshots.parquet"
 
+    @property
+    def manifest_path(self) -> Path:
+        return self.root / "manifest.parquet"
+
+    @property
+    def is_raw(self) -> bool:
+        return self.manifest_path.is_file() and self.raw_tables_root.is_dir()
+
     def snapshots(self) -> pl.DataFrame:
+        if self.is_raw:
+            manifest = self._raw_manifest().frame
+            if manifest.is_empty():
+                return _empty_snapshots()
+            return _snapshot_frame(manifest)
         if not self.snapshots_path.exists():
             return _empty_snapshots()
         frame = pl.read_parquet(self.snapshots_path)
@@ -396,9 +437,11 @@ class SavegameNotebookDataset:
 
     def dim(self, name: str) -> pl.DataFrame:
         path = self.dims_root / f"{name}.parquet"
-        if not path.exists():
-            return pl.DataFrame()
-        return pl.read_parquet(path)
+        if path.exists():
+            return pl.read_parquet(path)
+        if self.is_raw:
+            return self._raw_dimensions().get(name, pl.DataFrame())
+        return pl.DataFrame()
 
     def scan_fact(
         self,
@@ -407,15 +450,28 @@ class SavegameNotebookDataset:
         playthrough_id: str | None = None,
         good_id: str | None = None,
     ) -> pl.LazyFrame:
-        files = self.fact_files(table, playthrough_id=playthrough_id, good_id=good_id)
+        files = self.fact_files(
+            table,
+            playthrough_id=playthrough_id,
+            good_id=None if self.is_raw else good_id,
+        )
         if not files:
             return pl.DataFrame().lazy()
-        return pl.scan_parquet(
+        frame = pl.scan_parquet(
             [str(path) for path in files],
             hive_partitioning=False,
             missing_columns="insert",
             extra_columns="ignore",
         )
+        if self.is_raw:
+            frame = _prepare_raw_fact_frame(table, frame, self._raw_dimensions())
+        if good_id is not None:
+            good_code = self.code_for("goods", key_value=good_id)
+            if good_code is None:
+                return pl.DataFrame().lazy()
+            if "good_code" in frame.collect_schema().names():
+                frame = frame.filter(pl.col("good_code") == good_code)
+        return frame
 
     def fact_files(
         self,
@@ -424,10 +480,10 @@ class SavegameNotebookDataset:
         playthrough_id: str | None = None,
         good_id: str | None = None,
     ) -> list[Path]:
-        root = self.facts_root / table
+        root = (self.raw_tables_root if self.is_raw else self.facts_root) / table
         if playthrough_id is not None:
             root = root / f"playthrough_id={_safe_id(playthrough_id)}"
-        if good_id is not None:
+        if good_id is not None and not self.is_raw:
             good_code = self.code_for("goods", key_value=good_id)
             if good_code is None:
                 return []
@@ -436,6 +492,11 @@ class SavegameNotebookDataset:
         if not root.exists():
             return []
         files = sorted(root.rglob("*.parquet"))
+        if self.is_raw:
+            snapshot_ids = self._raw_snapshot_ids()
+            if snapshot_ids is None:
+                return files
+            return [path for path in files if path.stem in snapshot_ids]
         if good_id is None or table in GOOD_PARTITIONED_FACTS:
             return files
         good_code = self.code_for("goods", key_value=good_id)
@@ -445,7 +506,11 @@ class SavegameNotebookDataset:
             path
             for path in files
             if "good_code" in pl.read_parquet_schema(path)
-            and pl.scan_parquet(str(path)).filter(pl.col("good_code") == good_code).limit(1).collect().height
+            and pl.scan_parquet(str(path))
+            .filter(pl.col("good_code") == good_code)
+            .limit(1)
+            .collect()
+            .height
         ]
 
     def code_for(self, dimension: str, *, key_value: Any) -> int | None:
@@ -464,6 +529,40 @@ class SavegameNotebookDataset:
         if dim.is_empty() or spec["code"] not in frame.collect_schema().names():
             return frame
         return frame.join(dim.lazy(), on=spec["code"], how="left")
+
+    def _raw_manifest(self) -> _ManifestSelection:
+        return _select_manifest(self.root, active_save_dir=self.active_save_dir)
+
+    def _raw_snapshot_ids(self) -> set[str] | None:
+        return _snapshot_ids(self._raw_manifest().frame)
+
+    def _raw_dimensions(self) -> dict[str, pl.DataFrame]:
+        if self._dimension_cache is None:
+            manifest = self._raw_manifest()
+            active_snapshot_ids = _snapshot_ids(manifest.frame)
+            table_files = {
+                table: _filter_table_files_by_snapshots(
+                    sorted((self.raw_tables_root / table).rglob("*.parquet")),
+                    active_snapshot_ids,
+                )
+                for table in FACT_TABLES
+                if (self.raw_tables_root / table).exists()
+            }
+            dimensions = _build_dimensions(self.root, table_files, manifest.frame)
+            dimensions = _enrich_production_method_metadata(
+                dimensions,
+                profile=self.profile,
+                load_order_path=self.load_order_path,
+            )
+            dimensions = enrich_notebook_dimensions(
+                dimensions,
+                resolver=_notebook_label_resolver(
+                    profile=self.profile,
+                    load_order_path=self.load_order_path,
+                ),
+            )
+            self._dimension_cache = dimensions
+        return self._dimension_cache
 
     def rank_groups(
         self,
@@ -541,6 +640,8 @@ def build_savegame_notebook_dataset(
     output: str | Path,
     *,
     overwrite: bool = True,
+    skip_if_current: bool = False,
+    active_save_dir: str | Path | None = None,
     profile: str | DataProfile | None = None,
     load_order_path: str | Path = DEFAULT_LOAD_ORDER_PATH,
 ) -> NotebookBuildResult:
@@ -552,45 +653,81 @@ def build_savegame_notebook_dataset(
         raise ValueError("Notebook output must be different from the raw savegame dataset path.")
 
     started = time.perf_counter()
+    manifest = _select_manifest(source, active_save_dir=active_save_dir)
+    active_snapshot_ids = _snapshot_ids(manifest.frame)
     table_files = {
-        table: sorted((source / "tables" / table).rglob("*.parquet"))
+        table: _filter_table_files_by_snapshots(
+            sorted((source / "tables" / table).rglob("*.parquet")),
+            active_snapshot_ids,
+        )
         for table in FACT_TABLES
         if (source / "tables" / table).exists()
     }
-    if overwrite and target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "facts").mkdir(exist_ok=True)
-    (target / "dims").mkdir(exist_ok=True)
+    manifest_fingerprint = _manifest_fingerprint(manifest.frame)
+    build_metadata = {
+        "schema_version": NOTEBOOK_SCHEMA_VERSION,
+        "source": str(source),
+        "manifest_fingerprint": manifest_fingerprint,
+        "profile": _profile_name(profile),
+        "load_order": str(load_order_path),
+        "active_save_dir": str(manifest.active_save_dir) if manifest.active_save_dir else None,
+    }
+    if skip_if_current and _target_matches_metadata(target, build_metadata):
+        metadata = _read_metadata(target)
+        return NotebookBuildResult(
+            source=source,
+            output=target,
+            facts=dict(metadata.get("facts", {})),
+            dimensions=dict(metadata.get("dimensions", {})),
+            snapshots=int(metadata.get("snapshots", 0)),
+            elapsed_seconds=time.perf_counter() - started,
+            status="up-to-date",
+            stale_snapshots_ignored=manifest.stale_snapshots_ignored,
+            manifest_fingerprint=manifest_fingerprint,
+        )
 
-    snapshots = _write_snapshots(source, target)
-    dimensions = _build_dimensions(source, table_files)
-    dimensions = _enrich_production_method_metadata(
-        dimensions,
-        profile=profile,
-        load_order_path=load_order_path,
-    )
-    dimensions = enrich_notebook_dimensions(
-        dimensions,
-        resolver=NotebookLabelResolver.from_profile(
+    build_root = _prepare_build_root(target, overwrite=overwrite)
+    warnings: list[str] = []
+    try:
+        build_root.mkdir(parents=True, exist_ok=True)
+        (build_root / "facts").mkdir(exist_ok=True)
+        (build_root / "dims").mkdir(exist_ok=True)
+
+        snapshots = _write_snapshots(manifest.frame, build_root)
+        dimensions = _build_dimensions(source, table_files, manifest.frame)
+        dimensions = _enrich_production_method_metadata(
+            dimensions,
             profile=profile,
             load_order_path=load_order_path,
-        ),
-    )
-    dimension_counts = _write_dimensions(target, dimensions)
-    fact_counts = _write_facts(target, table_files, dimensions)
-    metadata = {
-        "schema_version": NOTEBOOK_SCHEMA_VERSION,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "source": str(source),
-        "facts": fact_counts,
-        "dimensions": dimension_counts,
-        "snapshots": snapshots,
-    }
-    (target / "metadata.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+        )
+        dimensions = enrich_notebook_dimensions(
+            dimensions,
+            resolver=_notebook_label_resolver(
+                profile=profile,
+                load_order_path=load_order_path,
+            ),
+        )
+        dimension_counts = _write_dimensions(build_root, dimensions)
+        fact_counts = _write_facts(build_root, table_files, dimensions)
+        metadata = {
+            **build_metadata,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "facts": fact_counts,
+            "dimensions": dimension_counts,
+            "snapshots": snapshots,
+            "total_source_snapshots": manifest.total_snapshots,
+            "stale_snapshots_ignored": manifest.stale_snapshots_ignored,
+        }
+        (build_root / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        if overwrite:
+            warnings.extend(_replace_directory(target, build_root))
+    except Exception:
+        if overwrite:
+            _cleanup_directory_best_effort(build_root)
+        raise
     return NotebookBuildResult(
         source=source,
         output=target,
@@ -598,6 +735,10 @@ def build_savegame_notebook_dataset(
         dimensions=dimension_counts,
         snapshots=snapshots,
         elapsed_seconds=time.perf_counter() - started,
+        status="rebuilt",
+        stale_snapshots_ignored=manifest.stale_snapshots_ignored,
+        manifest_fingerprint=manifest_fingerprint,
+        warnings=tuple(warnings),
     )
 
 
@@ -618,22 +759,249 @@ def rank_groups(
         expression = pl.col(metric).median()
     else:
         raise ValueError("statistic must be one of: sum, mean, median")
-    grouped = frame.group_by(group_by).agg(expression.alias(metric)).sort(
-        metric,
-        descending=descending,
+    grouped = (
+        frame.group_by(group_by)
+        .agg(expression.alias(metric))
+        .sort(
+            metric,
+            descending=descending,
+        )
     )
     if limit is not None:
         grouped = grouped.limit(limit)
     return grouped
 
 
-def _write_snapshots(source: Path, target: Path) -> int:
-    manifest = source / "manifest.parquet"
-    if not manifest.exists():
+def _select_manifest(
+    source: Path,
+    *,
+    active_save_dir: str | Path | None,
+) -> _ManifestSelection:
+    manifest_path = source / "manifest.parquet"
+    if manifest_path.exists():
+        frame = pl.read_parquet(manifest_path)
+    else:
+        frame = pl.DataFrame()
+    total_snapshots = frame.height
+    active_dir = (
+        Path(active_save_dir).expanduser().resolve() if active_save_dir is not None else None
+    )
+    if active_dir is None or frame.is_empty():
+        return _ManifestSelection(
+            frame=frame,
+            total_snapshots=total_snapshots,
+            stale_snapshots_ignored=0,
+            active_save_dir=active_dir,
+        )
+
+    path_column = (
+        "path"
+        if "path" in frame.columns
+        else "source_path"
+        if "source_path" in frame.columns
+        else None
+    )
+    if path_column is None:
+        return _ManifestSelection(
+            frame=frame,
+            total_snapshots=total_snapshots,
+            stale_snapshots_ignored=0,
+            active_save_dir=active_dir,
+        )
+
+    keep = [
+        _save_path_is_active(value, active_dir) for value in frame.get_column(path_column).to_list()
+    ]
+    filtered = frame.filter(pl.Series("_active_save", keep))
+    return _ManifestSelection(
+        frame=filtered,
+        total_snapshots=total_snapshots,
+        stale_snapshots_ignored=total_snapshots - filtered.height,
+        active_save_dir=active_dir,
+    )
+
+
+def _save_path_is_active(value: object, active_dir: Path) -> bool:
+    if value is None:
+        return False
+    path = Path(str(value)).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    if not resolved.is_file():
+        return False
+    try:
+        resolved.relative_to(active_dir)
+    except ValueError:
+        return False
+    return True
+
+
+def _snapshot_ids(manifest: pl.DataFrame) -> set[str] | None:
+    if "snapshot_id" not in manifest.columns:
+        return None
+    return {str(value) for value in manifest.get_column("snapshot_id").drop_nulls().to_list()}
+
+
+def _filter_table_files_by_snapshots(
+    files: list[Path], snapshot_ids: set[str] | None
+) -> list[Path]:
+    if snapshot_ids is None:
+        return files
+    return [path for path in files if path.stem in snapshot_ids]
+
+
+def _manifest_fingerprint(manifest: pl.DataFrame) -> str:
+    columns = [
+        column
+        for column in (
+            "snapshot_id",
+            "playthrough_id",
+            "path",
+            "source_path",
+            "mtime_ns",
+            "size",
+            "partial_hash",
+            "quick_hash",
+            "state_key",
+            "parser_profile",
+            "row_counts_json",
+        )
+        if column in manifest.columns
+    ]
+    if columns:
+        frame = manifest.select(columns)
+        sort_columns = [
+            column for column in ("playthrough_id", "snapshot_id", "path") if column in columns
+        ]
+        if sort_columns:
+            frame = frame.sort(sort_columns)
+        payload: object = frame.to_dicts()
+    else:
+        payload = []
+    encoded = json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _profile_name(profile: str | DataProfile | None) -> str | None:
+    if profile is None:
+        return None
+    if isinstance(profile, DataProfile):
+        return profile.name
+    return str(profile)
+
+
+def _read_metadata(target: Path) -> dict[str, Any]:
+    try:
+        return json.loads((target / "metadata.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _target_matches_metadata(target: Path, expected: dict[str, Any]) -> bool:
+    if not (target / "metadata.json").is_file() or not (target / "snapshots.parquet").is_file():
+        return False
+    if not (target / "facts").is_dir() or not (target / "dims").is_dir():
+        return False
+    metadata = _read_metadata(target)
+    return bool(metadata) and all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _prepare_build_root(target: Path, *, overwrite: bool) -> Path:
+    if not overwrite:
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.parent / f".{target.name}.tmp.{os.getpid()}.{time.time_ns()}"
+
+
+def _replace_directory(target: Path, build_root: Path) -> list[str]:
+    if build_root == target:
+        return []
+    backup: Path | None = None
+    if target.exists():
+        backup = target.parent / f".{target.name}.old.{os.getpid()}.{time.time_ns()}"
+        try:
+            _rename_with_retries(target, backup)
+        except OSError as exc:
+            raise OSError(
+                f"Could not replace notebook output at {target}. Close open notebooks or Windows "
+                "Explorer views using that directory, then rerun the build."
+            ) from exc
+    try:
+        _rename_with_retries(build_root, target)
+    except OSError as exc:
+        if backup is not None and backup.exists() and not target.exists():
+            try:
+                _rename_with_retries(backup, target)
+            except OSError:
+                pass
+        raise OSError(f"Could not move staged notebook output into place at {target}.") from exc
+
+    warnings: list[str] = []
+    if backup is not None:
+        warning = _cleanup_directory_best_effort(backup)
+        if warning:
+            warnings.append(warning)
+    return warnings
+
+
+def _rename_with_retries(source: Path, target: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            source.rename(target)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.25 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _cleanup_directory_best_effort(path: Path) -> str | None:
+    last_error: OSError | None = None
+    for attempt in range(4):
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+            return None
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.1 * (attempt + 1))
+    if last_error is None:
+        return None
+    return (
+        f"Could not remove old notebook output {path}: {last_error}. The new dataset is already "
+        "in place; close any open notebooks or Windows Explorer views and delete that old "
+        "directory later."
+    )
+
+
+def _snapshot_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    if frame.is_empty():
+        return _empty_snapshots()
+    if "source_path" not in frame.columns and "path" in frame.columns:
+        frame = frame.with_columns(pl.col("path").cast(pl.String).alias("source_path"))
+    missing = [
+        pl.lit(None, dtype=dtype).alias(column)
+        for column, dtype in SNAPSHOT_SCHEMA.items()
+        if column not in frame.columns
+    ]
+    if missing:
+        frame = frame.with_columns(missing)
+    return _with_date_sort(_compact_frame(frame))
+
+
+def _write_snapshots(manifest: pl.DataFrame, target: Path) -> int:
+    if manifest.is_empty() or "snapshot_id" not in manifest.columns:
         _empty_snapshots().write_parquet(target / "snapshots.parquet", compression="zstd")
         return 0
-    frame = pl.read_parquet(manifest)
-    frame = _with_date_sort(_compact_frame(frame))
+    frame = _snapshot_frame(manifest)
     frame.write_parquet(target / "snapshots.parquet", compression="zstd")
     return frame.height
 
@@ -645,17 +1013,15 @@ def _empty_snapshots() -> pl.DataFrame:
 def _build_dimensions(
     source: Path,
     table_files: dict[str, list[Path]],
+    manifest_frame: pl.DataFrame,
 ) -> dict[str, pl.DataFrame]:
     dimensions: dict[str, pl.DataFrame] = {}
-    manifest = source / "manifest.parquet"
-    if manifest.exists():
-        manifest_frame = pl.read_parquet(manifest)
-        if "playthrough_id" in manifest_frame.columns:
-            dimensions["playthroughs"] = _dimension_with_code(
-                manifest_frame.select("playthrough_id").unique().drop_nulls("playthrough_id"),
-                key="playthrough_id",
-                code="playthrough_code",
-            )
+    if "playthrough_id" in manifest_frame.columns:
+        dimensions["playthroughs"] = _dimension_with_code(
+            manifest_frame.select("playthrough_id").unique().drop_nulls("playthrough_id"),
+            key="playthrough_id",
+            code="playthrough_code",
+        )
     for name, spec in DIMENSION_SPECS.items():
         rows: list[pl.DataFrame] = []
         requested = tuple(spec["columns"])
@@ -755,6 +1121,20 @@ def _production_method_metadata(
     return methods.select(expressions).unique("name", keep="first", maintain_order=True)
 
 
+def _notebook_label_resolver(
+    *,
+    profile: str | DataProfile | None,
+    load_order_path: str | Path,
+) -> NotebookLabelResolver:
+    try:
+        return NotebookLabelResolver.from_profile(
+            profile=profile,
+            load_order_path=load_order_path,
+        )
+    except (FileNotFoundError, KeyError, OSError):
+        return NotebookLabelResolver()
+
+
 def _with_production_method_slot_defaults(frame: pl.DataFrame) -> pl.DataFrame:
     additions: list[pl.Expr] = []
     for column, dtype in {
@@ -826,6 +1206,29 @@ def _read_table_fact(path: Path, table: str) -> pl.DataFrame:
     return _read_columns(path, columns)
 
 
+def _prepare_raw_fact_frame(
+    table: str,
+    frame: pl.LazyFrame,
+    dimensions: dict[str, pl.DataFrame],
+) -> pl.LazyFrame:
+    schema = frame.collect_schema()
+    requested = set(TABLE_COLUMNS.get(table, COMMON_COLUMNS))
+    prefixes = TABLE_PREFIXES.get(table, ())
+    columns = [
+        column
+        for column in schema.names()
+        if column == "date_sort"
+        or column in requested
+        or any(column.startswith(prefix) for prefix in prefixes)
+    ]
+    if not columns:
+        return pl.DataFrame().lazy()
+    frame = frame.select(list(dict.fromkeys(columns)))
+    frame = _encode_dimensions_lazy(frame, dimensions)
+    frame = _with_date_sort_lazy(frame)
+    return _compact_lazy_frame(frame)
+
+
 def _read_columns(path: Path, columns: Sequence[str]) -> pl.DataFrame:
     return pl.read_parquet(path, columns=list(dict.fromkeys(columns)))
 
@@ -855,12 +1258,47 @@ def _encode_dimensions(
     return frame
 
 
+def _encode_dimensions_lazy(
+    frame: pl.LazyFrame,
+    dimensions: dict[str, pl.DataFrame],
+) -> pl.LazyFrame:
+    for fact_column, dimension_name, code_column in ENCODE_SPECS:
+        if fact_column not in frame.collect_schema().names():
+            continue
+        dimension = dimensions.get(dimension_name)
+        if dimension is None or dimension.is_empty():
+            continue
+        spec = DIMENSION_SPECS[dimension_name]
+        key_column = str(spec["key"])
+        dimension_code = str(spec["code"])
+        if key_column not in dimension.columns:
+            continue
+        code_source = code_column if code_column in dimension.columns else dimension_code
+        if code_source not in dimension.columns:
+            continue
+        mapping = dimension.select(
+            pl.col(key_column),
+            pl.col(code_source).alias(code_column),
+        )
+        frame = frame.join(mapping.lazy(), left_on=fact_column, right_on=key_column, how="left")
+    drop_columns: list[str] = []
+    names = set(frame.collect_schema().names())
+    for code_column, label_columns in LABEL_COLUMNS_TO_DROP.items():
+        if code_column in names:
+            drop_columns.extend(column for column in label_columns if column in names)
+    if drop_columns:
+        frame = frame.drop(*sorted(set(drop_columns)))
+    return frame
+
+
 def _write_fact_frame(target: Path, table: str, source_path: Path, frame: pl.DataFrame) -> None:
     playthrough_id = _frame_value(frame, "playthrough_id")
     snapshot_id = _frame_value(frame, "snapshot_id") or source_path.stem
     table_root = target / "facts" / table / f"playthrough_id={_safe_id(playthrough_id)}"
     if table in GOOD_PARTITIONED_FACTS and "good_code" in frame.columns:
-        for key, partition in frame.partition_by("good_code", as_dict=True, maintain_order=True).items():
+        for key, partition in frame.partition_by(
+            "good_code", as_dict=True, maintain_order=True
+        ).items():
             good_code = key[0] if isinstance(key, tuple) else key
             path = table_root / f"good_code={good_code}" / f"{snapshot_id}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -908,15 +1346,63 @@ def _compact_frame(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.with_columns(expressions)
 
 
+def _compact_lazy_frame(frame: pl.LazyFrame) -> pl.LazyFrame:
+    schema = frame.collect_schema()
+    expressions: list[pl.Expr] = []
+    for name, dtype in schema.items():
+        expression = pl.col(name)
+        if name == "year":
+            expression = expression.cast(pl.UInt16, strict=False)
+        elif name in {"month", "day"}:
+            expression = expression.cast(pl.UInt8, strict=False)
+        elif name == "date_sort":
+            expression = expression.cast(pl.UInt32, strict=False)
+        elif name.endswith("_code"):
+            expression = expression.cast(pl.UInt32, strict=False)
+        elif name in IDENTIFIER_COLUMNS:
+            pass
+        elif dtype.is_integer():
+            expression = expression.cast(pl.Float32, strict=False)
+        elif dtype.is_float():
+            expression = expression.cast(pl.Float32, strict=False)
+        expressions.append(expression.alias(name))
+    return frame.with_columns(expressions)
+
+
 def _with_date_sort(frame: pl.DataFrame) -> pl.DataFrame:
-    if {"year", "month", "day"}.issubset(frame.columns) and "date_sort" not in frame.columns:
-        return frame.with_columns(
-            (
-                pl.col("year").cast(pl.UInt32, strict=False) * 10_000
-                + pl.col("month").cast(pl.UInt32, strict=False) * 100
-                + pl.col("day").cast(pl.UInt32, strict=False)
-            ).alias("date_sort")
+    if {"year", "month", "day"}.issubset(frame.columns):
+        computed = (
+            pl.col("year").cast(pl.UInt32, strict=False) * 10_000
+            + pl.col("month").cast(pl.UInt32, strict=False) * 100
+            + pl.col("day").cast(pl.UInt32, strict=False)
         )
+        if "date_sort" in frame.columns:
+            return frame.with_columns(
+                pl.when(pl.col("date_sort").is_null())
+                .then(computed)
+                .otherwise(pl.col("date_sort"))
+                .alias("date_sort")
+            )
+        return frame.with_columns(computed.alias("date_sort"))
+    return frame
+
+
+def _with_date_sort_lazy(frame: pl.LazyFrame) -> pl.LazyFrame:
+    names = frame.collect_schema().names()
+    if {"year", "month", "day"}.issubset(names):
+        computed = (
+            pl.col("year").cast(pl.UInt32, strict=False) * 10_000
+            + pl.col("month").cast(pl.UInt32, strict=False) * 100
+            + pl.col("day").cast(pl.UInt32, strict=False)
+        )
+        if "date_sort" in names:
+            return frame.with_columns(
+                pl.when(pl.col("date_sort").is_null())
+                .then(computed)
+                .otherwise(pl.col("date_sort"))
+                .alias("date_sort")
+            )
+        return frame.with_columns(computed.alias("date_sort"))
     return frame
 
 
@@ -944,4 +1430,6 @@ def _concat_non_empty(frames: Iterable[pl.LazyFrame]) -> pl.LazyFrame:
 
 def _safe_id(value: Any) -> str:
     text = str(value or "unknown")
-    return "".join(character if character.isalnum() or character in {"_", "-"} else "_" for character in text)
+    return "".join(
+        character if character.isalnum() or character in {"_", "-"} else "_" for character in text
+    )

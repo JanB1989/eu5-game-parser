@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -17,6 +18,8 @@ from eu5gameparser.savegame.notebook_dataset import SavegameNotebookDataset
 @dataclass(frozen=True)
 class WorkbenchConfig:
     data_root: Path | None = None
+    profile: str | None = "constructor"
+    load_order_path: Path | None = None
     playthrough: str | None = None
     start_date: int | None = None
     end_date: int | None = None
@@ -47,6 +50,8 @@ class WorkbenchConfig:
             flow_group_by = (flow_group_by,)
         return cls(
             data_root=values.get("DATA_ROOT"),
+            profile=values.get("PROFILE", cls.profile),
+            load_order_path=values.get("LOAD_ORDER_PATH"),
             playthrough=values.get("PLAYTHROUGH"),
             start_date=values.get("START_DATE"),
             end_date=values.get("END_DATE"),
@@ -148,13 +153,27 @@ def open_workbench(config: WorkbenchConfig | None = None) -> SavegameWorkbench:
 class SavegameWorkbench:
     def __init__(self, config: WorkbenchConfig):
         self.config = config
-        self.repo = _find_repo_root()
-        self.data_root = Path(config.data_root) if config.data_root else self.repo / "graphs" / "savegame_notebooks" / "data"
-        self.dataset = SavegameNotebookDataset(self.data_root)
+        self.repo = _portable_path(_find_repo_root())
+        self.data_root = (
+            _portable_path(config.data_root)
+            if config.data_root
+            else self.repo / "graphs" / "dataset"
+        )
+        load_order_path = (
+            _portable_path(config.load_order_path)
+            if config.load_order_path is not None
+            else self.repo / "constructor.load_order.toml"
+        )
+        profile = config.profile if load_order_path.is_file() else None
+        self.dataset = SavegameNotebookDataset(
+            self.data_root,
+            profile=profile,
+            load_order_path=load_order_path,
+        )
         self.snapshots = self.dataset.snapshots()
         if self.snapshots.is_empty():
             raise RuntimeError(
-                "No optimized savegame notebook data found. Run `uv run ppc savegame-notebooks build` "
+                "No raw savegame dataset found. Run `uv run ppc savegame-notebooks build` "
                 "from the constructor repo, then restart this kernel."
             )
         self.playthrough = config.playthrough or self.dataset.latest_playthrough()
@@ -207,6 +226,7 @@ class SavegameWorkbench:
     def print_selection(self) -> None:
         print(f"repo: {self.repo}")
         print(f"data: {self.data_root}")
+        print(f"data mode: {'raw' if self.dataset.is_raw else 'optimized'}")
         print(f"playthrough: {self.playthrough}")
         print(f"good: {self.active_good_label} ({self.active_good})")
         print(f"market search: {self.market_query or 'all markets'}")
@@ -503,9 +523,11 @@ class SavegameWorkbench:
         band_plot(result.price_distribution, _time_axis(result.price_distribution), "price_p10", "price_p50", "price_p90", title="Food price distribution")
 
     def plot_buildings(self, result: BuildingResults) -> None:
-        slot_line_plots(result.pm_slot_time_series, "share", title=f"{self.building_label} production method share over time")
-        slot_barh_plots(result.pm_slot_latest, "share", "production_method_label", title=f"Latest {self.building_label} production method distribution")
-        line_plot(result.pm_flow_time_series, _time_axis(result.pm_flow_time_series), "amount", hue="direction", title=f"{self.active_good_label} PM flows for {self.building_label}")
+        slot_line_plots(
+            result.pm_slot_time_series,
+            "buildings",
+            title=f"{self.building_label} production method usage over time",
+        )
 
 
 def line_plot(frame: pl.DataFrame, x: str, y: str, *, hue: str | None = None, title: str = "") -> None:
@@ -644,11 +666,29 @@ def heatmap(frame: pl.DataFrame, index: str, columns: str, values: str, *, title
 
 
 def _find_repo_root(start: Path | None = None) -> Path:
-    current = (start or Path.cwd()).resolve()
+    current = _portable_path(start or Path.cwd()).resolve()
     for candidate in (current, *current.parents):
         if (candidate / "constructor.toml").is_file():
             return candidate
     raise FileNotFoundError("Could not find constructor.toml; run this notebook from the constructor repo.")
+
+
+def _portable_path(value: str | Path) -> Path:
+    path = Path(value)
+    if path.exists():
+        return path
+    text = str(value).replace("\\", "/")
+    wsl_match = re.match(r"^/mnt/([A-Za-z])/(.*)$", text)
+    if wsl_match:
+        drive, rest = wsl_match.groups()
+        return Path(f"{drive.upper()}:/{rest}")
+    windows_match = re.match(r"^([A-Za-z]):/(.*)$", text)
+    if windows_match:
+        drive, rest = windows_match.groups()
+        candidate = Path("/mnt") / drive.lower() / rest
+        if candidate.exists():
+            return candidate
+    return path
 
 
 def _first_value(frame: pl.DataFrame, column: str) -> object | None:

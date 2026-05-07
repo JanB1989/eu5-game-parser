@@ -118,6 +118,16 @@ def test_load_savegame_tables_from_text_fixture(tmp_path: Path) -> None:
     assert masonry["supplied_Trade"] == 1.0
     assert masonry["demanded_Pops"] == 2.0
     assert masonry["demanded_Trade"] == 1.0
+    for column in (
+        "demanded_Temporary",
+        "taken_Temporary",
+        "demanded_Units",
+        "taken_Units",
+        "demanded_Roads",
+        "taken_Roads",
+    ):
+        assert column in tables.market_goods.columns
+        assert masonry[column] is None
 
 
 def test_production_method_flows_reconcile_to_save_buckets(tmp_path: Path) -> None:
@@ -514,6 +524,9 @@ def test_savegame_cli_writes_parquet_tables(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.stdout
     assert "Savegame" in result.stdout
+    assert "save:" in result.stdout
+    assert "date: 1337.1.1" in result.stdout
+    assert f"parquet: {output}" in result.stdout
     assert "explorer:" in result.stdout
     assert "market_goods: 3" in result.stdout
     assert (output / "production_method_good_flows.parquet").exists()

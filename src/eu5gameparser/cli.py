@@ -186,11 +186,28 @@ def savegame(
     )
     explorer_path = write_savegame_explorer_html(tables, output / "savegame_explorer.html")
     _print_header(profile, output)
-    typer.echo(f"explorer: {explorer_path}")
+    _print_savegame_summary(tables, output, explorer_path)
     typer.echo("")
-    typer.echo("Savegame")
+    typer.echo("Savegame tables")
     for name, table in tables.as_dict().items():
         _print_table_summary(name, table)
+
+
+def _print_savegame_summary(tables, output: Path, explorer_path: Path) -> None:
+    metadata = (
+        tables.save_metadata.to_dicts()[0]
+        if hasattr(tables, "save_metadata") and not tables.save_metadata.is_empty()
+        else {}
+    )
+    save_path = metadata.get("path")
+    if save_path:
+        typer.echo(f"save: {save_path}")
+    if metadata.get("date"):
+        typer.echo(f"date: {metadata.get('date')}")
+    if metadata.get("playthrough_id"):
+        typer.echo(f"playthrough: {metadata.get('playthrough_id')}")
+    typer.echo(f"parquet: {output}")
+    typer.echo(f"explorer: {explorer_path}")
 
 
 @savegame_app.command("ingest")
@@ -405,8 +422,22 @@ def savegame_notebooks_build(
     ] = Path("out/savegame_notebooks/data"),
     no_overwrite: Annotated[
         bool,
-        typer.Option(help="Keep existing notebook output files instead of replacing the directory."),
+        typer.Option(
+            help="Keep existing notebook output files instead of replacing the directory."
+        ),
     ] = False,
+    skip_if_current: Annotated[
+        bool,
+        typer.Option(
+            help="Skip the notebook build when output metadata matches the raw dataset manifest."
+        ),
+    ] = False,
+    active_save_dir: Annotated[
+        Path | None,
+        typer.Option(
+            help="Only include raw snapshots whose source save still exists under this directory."
+        ),
+    ] = None,
     profile: Annotated[
         str | None,
         typer.Option(help="Load-order profile used to resolve readable labels."),
@@ -420,15 +451,21 @@ def savegame_notebooks_build(
         dataset,
         output,
         overwrite=not no_overwrite,
+        skip_if_current=skip_if_current,
+        active_save_dir=active_save_dir,
         profile=profile,
         load_order_path=load_order,
     )
     typer.echo(f"source: {result.source}")
     typer.echo(f"wrote: {result.output}")
+    typer.echo(f"status: {result.status}")
     typer.echo(f"snapshots: {result.snapshots}")
+    typer.echo(f"stale_snapshots_ignored: {result.stale_snapshots_ignored}")
     typer.echo(f"facts: {sum(result.facts.values())}")
     typer.echo(f"dimensions: {sum(result.dimensions.values())}")
     typer.echo(f"seconds: {result.elapsed_seconds:.2f}")
+    for warning in result.warnings:
+        typer.echo(f"warning: {warning}")
 
 
 @app.command("goods-flow", hidden=True)
