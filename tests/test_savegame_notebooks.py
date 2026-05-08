@@ -235,6 +235,102 @@ def test_notebook_builder_writes_readable_labels_from_load_order(tmp_path: Path)
     assert ana.resolve_codes(dataset, "markets", values="London") == [0]
 
 
+def test_notebook_builder_localizes_pm_slot_labels_with_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "building_methods",
+        "aaa",
+        "s1",
+        [
+            _building_method("aaa", "s1", 1337, 1, 10, "bakery", "pm_bake"),
+            _building_method("aaa", "s1", 1337, 1, 10, "bakery", "pm_pack"),
+            _building_method("aaa", "s1", 1337, 1, 10, "bakery", "pm_free"),
+        ],
+    )
+    monkeypatch.setattr(
+        notebook_dataset,
+        "load_building_data",
+        lambda **_: type(
+            "BuildingData",
+            (),
+            {
+                "production_methods": pl.DataFrame(
+                    {
+                        "name": ["pm_bake", "pm_pack", "pm_free"],
+                        "building": ["bakery", "bakery", "bakery"],
+                        "production_method_group": ["bakery:0", "bakery:1", None],
+                        "production_method_group_index": [0, 1, None],
+                    }
+                )
+            },
+        )(),
+    )
+    load_order = _write_load_order(
+        tmp_path,
+        vanilla_localization={},
+        mod_localization={"bakery_slot_0": "Bake Line"},
+    )
+
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(
+            source,
+            tmp_path / "notebooks" / "data",
+            profile="constructor",
+            load_order_path=load_order,
+        ).output
+    )
+
+    slot_labels = {
+        row["production_method"]: row["slot_label"]
+        for row in dataset.dim("production_methods")
+        .select("production_method", "slot_label")
+        .to_dicts()
+    }
+    assert slot_labels == {
+        "pm_bake": "Bake Line",
+        "pm_pack": "Slot 2",
+        "pm_free": "Unslotted",
+    }
+
+
+def test_exact_dimension_query_filters_before_contains_matches(tmp_path: Path) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
+    _write_table(
+        source,
+        "building_methods",
+        "aaa",
+        "s1",
+        [
+            _building_method("aaa", "s1", 1337, 1, 10, "forest_village", "pm_forest"),
+            _building_method(
+                "aaa",
+                "s1",
+                1337,
+                2,
+                20,
+                "managed_forest_village",
+                "pm_managed_forest",
+            ),
+        ],
+    )
+    dataset = SavegameNotebookDataset(
+        build_savegame_notebook_dataset(source, tmp_path / "notebooks" / "data").output
+    )
+
+    matches = ana.resolve_codes(dataset, "building_types", query="forest_village")
+    forest_code = dataset.code_for("building_types", key_value="forest_village")
+    managed_code = dataset.code_for("building_types", key_value="managed_forest_village")
+
+    assert matches == [forest_code]
+    assert managed_code not in matches
+
+
 def test_rank_groups_uses_raw_rows_for_sum_mean_and_median() -> None:
     frame = pl.DataFrame(
         {
@@ -937,6 +1033,240 @@ def test_workbench_pm_slot_views_ignore_pm_drilldown_search(tmp_path: Path, monk
     )
 
 
+def test_plot_buildings_uses_share_and_separates_building_slots(monkeypatch) -> None:
+    titles: list[str] = []
+    ylabels: list[str] = []
+
+    def record_axis(_ax: object, _x: str, title: str, _xlabel: str, ylabel: str) -> None:
+        titles.append(title)
+        ylabels.append(ylabel)
+
+    monkeypatch.setattr(wb, "_finish_line_axis", record_axis)
+    workbench = object.__new__(wb.SavegameWorkbench)
+    workbench.building_label = "selected buildings"
+    workbench.dataset = _FakeSlotMetadataDataset(pl.DataFrame())
+    slot_time_series = pl.DataFrame(
+        [
+            {
+                "year": 1342,
+                "building_label": building,
+                "slot_label": slot,
+                "production_method_group_index": group_index,
+                "production_method_label": method,
+                "buildings": buildings,
+                "share": share,
+            }
+            for building, slot, group_index, method, buildings, share in [
+                ("Cookery", "Prepared Victuals", 0, "Stew", 1, 0.5),
+                ("Cookery", "Prepared Victuals", 0, "Congee", 1, 0.5),
+                ("Cookery", "Ration Drink", 1, "Well Water", 2, 1.0),
+                ("Cookery", "Packing", 2, "No Packing", 2, 1.0),
+                ("Forest Village", "Forest Resources", 0, "Forest Game", 1, 1.0),
+                ("Forest Village", "Forest Work", 1, "Hunting Lodges", 1, 1.0),
+            ]
+        ]
+    )
+    result = wb.BuildingResults(
+        latest=pl.DataFrame(),
+        time_series=pl.DataFrame(),
+        pm_adoption=pl.DataFrame(),
+        pm_preferences=pl.DataFrame(),
+        pm_slot_latest=pl.DataFrame(),
+        pm_slot_time_series=slot_time_series,
+        pm_flow_time_series=pl.DataFrame(),
+        pm_values=pl.DataFrame(),
+    )
+
+    try:
+        workbench.plot_buildings(result)
+    finally:
+        wb.plt.close("all")
+
+    assert ylabels == ["share", "share", "share", "share", "share"]
+    assert titles == [
+        "selected buildings production method share over time - Cookery / Prepared Victuals",
+        "selected buildings production method share over time - Cookery / Ration Drink",
+        "selected buildings production method share over time - Cookery / Packing",
+        "selected buildings production method share over time - Forest Village / Forest Resources",
+        "selected buildings production method share over time - Forest Village / Forest Work",
+    ]
+
+
+def test_plot_buildings_repairs_unslotted_slots_from_metadata(monkeypatch) -> None:
+    titles: list[str] = []
+
+    def record_axis(_ax: object, _x: str, title: str, _xlabel: str, _ylabel: str) -> None:
+        titles.append(title)
+
+    monkeypatch.setattr(wb, "_finish_line_axis", record_axis)
+    workbench = object.__new__(wb.SavegameWorkbench)
+    workbench.building_label = "Cookery"
+    workbench.dataset = _FakeSlotMetadataDataset(
+        pl.DataFrame(
+            {
+                "production_method": ["meal", "drink", "pack"],
+                "production_method_label": ["Meal", "Drink", "Pack"],
+                "slot_label": ["Prepared Victuals", "Ration Drink", "Packing"],
+                "production_method_group_index": [0, 1, 2],
+            }
+        )
+    )
+    result = wb.BuildingResults(
+        latest=pl.DataFrame(),
+        time_series=pl.DataFrame(),
+        pm_adoption=pl.DataFrame(),
+        pm_preferences=pl.DataFrame(),
+        pm_slot_latest=pl.DataFrame(),
+        pm_slot_time_series=pl.DataFrame(
+            {
+                "year": [1342, 1342, 1342],
+                "building_label": ["Cookery", "Cookery", "Cookery"],
+                "slot_label": ["Unslotted", "Unslotted", "Unslotted"],
+                "production_method": ["meal", "drink", "pack"],
+                "production_method_label": ["Meal", "Drink", "Pack"],
+                "buildings": [2, 2, 2],
+                "share": [1 / 3, 1 / 3, 1 / 3],
+            }
+        ),
+        pm_flow_time_series=pl.DataFrame(),
+        pm_values=pl.DataFrame(),
+    )
+
+    try:
+        workbench.plot_buildings(result)
+    finally:
+        wb.plt.close("all")
+
+    assert titles == [
+        "Cookery production method share over time - Cookery / Prepared Victuals",
+        "Cookery production method share over time - Cookery / Ration Drink",
+        "Cookery production method share over time - Cookery / Packing",
+    ]
+
+
+def test_plot_building_slot_plots_one_slot_and_skips_empty(monkeypatch) -> None:
+    titles: list[str] = []
+
+    def record_axis(_ax: object, _x: str, title: str, _xlabel: str, _ylabel: str) -> None:
+        titles.append(title)
+
+    monkeypatch.setattr(wb, "_finish_line_axis", record_axis)
+    workbench = object.__new__(wb.SavegameWorkbench)
+    workbench.building_label = "Cookery"
+    workbench.dataset = _FakeSlotMetadataDataset(
+        pl.DataFrame(
+            {
+                "production_method": ["meal", "drink", "pack"],
+                "production_method_label": ["Meal", "Drink", "Pack"],
+                "slot_label": ["Prepared Victuals", "Ration Drink", "Packing"],
+                "production_method_group_index": [0, 1, 2],
+            }
+        )
+    )
+    result = wb.BuildingResults(
+        latest=pl.DataFrame(),
+        time_series=pl.DataFrame(),
+        pm_adoption=pl.DataFrame(),
+        pm_preferences=pl.DataFrame(),
+        pm_slot_latest=pl.DataFrame(),
+        pm_slot_time_series=pl.DataFrame(
+            {
+                "year": [1342, 1342, 1342],
+                "building_label": ["Cookery", "Cookery", "Cookery"],
+                "slot_label": ["Unslotted", "Unslotted", "Unslotted"],
+                "production_method": ["meal", "drink", "pack"],
+                "production_method_label": ["Meal", "Drink", "Pack"],
+                "buildings": [2, 2, 2],
+                "share": [1 / 3, 1 / 3, 1 / 3],
+            }
+        ),
+        pm_flow_time_series=pl.DataFrame(),
+        pm_values=pl.DataFrame(),
+    )
+
+    try:
+        workbench.plot_building_slot(result, 0)
+        workbench.plot_building_slot(result, 1)
+        workbench.plot_building_slot(result, 2)
+        workbench.plot_building_slot(result, 3)
+    finally:
+        wb.plt.close("all")
+
+    assert titles == [
+        "Cookery production method share over time - Cookery / Prepared Victuals",
+        "Cookery production method share over time - Cookery / Ration Drink",
+        "Cookery production method share over time - Cookery / Packing",
+    ]
+
+
+def test_plot_building_slot_rebuilds_stale_empty_result(monkeypatch) -> None:
+    titles: list[str] = []
+
+    def record_axis(_ax: object, _x: str, title: str, _xlabel: str, _ylabel: str) -> None:
+        titles.append(title)
+
+    monkeypatch.setattr(wb, "_finish_line_axis", record_axis)
+    workbench = object.__new__(wb.SavegameWorkbench)
+    workbench.building_label = "Cookery"
+    workbench.dataset = _FakeSlotMetadataDataset(
+        pl.DataFrame(
+            {
+                "production_method": ["meal"],
+                "production_method_label": ["Meal"],
+                "slot_label": ["Prepared Victuals"],
+                "production_method_group_index": [0],
+            }
+        )
+    )
+    stale = wb.BuildingResults(
+        latest=pl.DataFrame(),
+        time_series=pl.DataFrame(),
+        pm_adoption=pl.DataFrame(),
+        pm_preferences=pl.DataFrame(),
+        pm_slot_latest=pl.DataFrame(),
+        pm_slot_time_series=pl.DataFrame(
+            {
+                "year": [1342],
+                "building_label": ["Cookery"],
+                "slot_label": ["Unslotted"],
+                "production_method_label": ["Pp Cookery Meal"],
+                "buildings": [2],
+                "share": [1.0],
+            }
+        ),
+        pm_flow_time_series=pl.DataFrame(),
+        pm_values=pl.DataFrame(),
+    )
+    fresh = wb.BuildingResults(
+        latest=pl.DataFrame(),
+        time_series=pl.DataFrame(),
+        pm_adoption=pl.DataFrame(),
+        pm_preferences=pl.DataFrame(),
+        pm_slot_latest=pl.DataFrame(),
+        pm_slot_time_series=pl.DataFrame(
+            {
+                "year": [1342],
+                "building_label": ["Cookery"],
+                "slot_label": ["Unslotted"],
+                "production_method": ["meal"],
+                "production_method_label": ["Meal"],
+                "buildings": [2],
+                "share": [1.0],
+            }
+        ),
+        pm_flow_time_series=pl.DataFrame(),
+        pm_values=pl.DataFrame(),
+    )
+    monkeypatch.setattr(workbench, "buildings", lambda: fresh)
+
+    try:
+        workbench.plot_building_slot(stale, 0)
+    finally:
+        wb.plt.close("all")
+
+    assert titles == ["Cookery production method share over time - Cookery / Prepared Victuals"]
+
+
 def test_workbench_opens_raw_dataset_when_load_order_path_is_missing(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "graphs" / "dataset"
     _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10)])
@@ -1217,6 +1547,19 @@ def test_notebook_builder_ignores_manifest_rows_missing_from_active_save_dir(
     assert dataset.snapshots().get_column("snapshot_id").to_list() == ["s2"]
     facts = dataset.scan_fact("market_goods").collect()
     assert facts.get_column("playthrough_id").to_list() == ["bbb"]
+
+
+class _FakeSlotMetadataDataset:
+    profile = None
+    load_order_path = Path("missing.load_order.toml")
+
+    def __init__(self, methods: pl.DataFrame):
+        self._methods = methods
+
+    def dim(self, name: str) -> pl.DataFrame:
+        if name != "production_methods":
+            raise KeyError(name)
+        return self._methods
 
 
 def _manifest_row(

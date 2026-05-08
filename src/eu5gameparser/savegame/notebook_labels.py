@@ -76,10 +76,13 @@ def enrich_notebook_dimensions(
         elif name == "building_types":
             result[name] = _with_label(frame, "building_type", "building_label", resolver)
         elif name == "production_methods":
-            result[name] = _with_label(
-                frame,
-                "production_method",
-                "production_method_label",
+            result[name] = _with_production_method_slot_labels(
+                _with_label(
+                    frame,
+                    "production_method",
+                    "production_method_label",
+                    resolver,
+                ),
                 resolver,
             )
         elif name == "countries":
@@ -130,6 +133,50 @@ def _with_label(
         )
         .alias(label_column)
     )
+
+
+def _with_production_method_slot_labels(
+    frame: pl.DataFrame,
+    resolver: NotebookLabelResolver,
+) -> pl.DataFrame:
+    required = {"production_method_building", "production_method_group_index"}
+    if not required.issubset(frame.columns):
+        return frame
+    if "slot_label" not in frame.columns:
+        frame = frame.with_columns(pl.lit(None, dtype=pl.String).alias("slot_label"))
+    return frame.with_columns(
+        pl.struct(
+            [
+                "production_method_building",
+                "production_method_group_index",
+                "slot_label",
+            ]
+        )
+        .map_elements(
+            lambda row: _production_method_slot_label(row, resolver),
+            return_dtype=pl.String,
+        )
+        .alias("slot_label")
+    )
+
+
+def _production_method_slot_label(
+    row: dict[str, object],
+    resolver: NotebookLabelResolver,
+) -> str:
+    existing = row.get("slot_label")
+    group_index = row.get("production_method_group_index")
+    if group_index is None:
+        return str(existing or "Unslotted")
+    try:
+        index = int(group_index)
+    except (TypeError, ValueError):
+        return str(existing or "Unslotted")
+    fallback = str(existing or f"Slot {index + 1}")
+    building = row.get("production_method_building")
+    if building is None or str(building).strip() == "":
+        return fallback
+    return resolver.label(f"{building}_slot_{index}", fallback=fallback)
 
 
 def _with_location_labels(frame: pl.DataFrame, resolver: NotebookLabelResolver) -> pl.DataFrame:

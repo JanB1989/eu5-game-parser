@@ -120,11 +120,33 @@ def resolve_codes(
         matches = frame.filter(pl.any_horizontal(predicates))
     else:
         matches = search_dimension(dataset, dimension, query, limit=limit or 10_000)
+        exact_matches = _exact_query_matches(matches, query)
+        if not exact_matches.is_empty():
+            matches = exact_matches
     if limit is not None:
         matches = matches.head(limit)
     if matches.is_empty() or code_column not in matches.columns:
         return []
     return [int(value) for value in matches[code_column].drop_nulls().to_list()]
+
+
+def _exact_query_matches(frame: pl.DataFrame, query: object | None) -> pl.DataFrame:
+    if query is None or frame.is_empty():
+        return frame.head(0)
+    text = str(query).strip().lower()
+    if not text:
+        return frame.head(0)
+    searchable = _searchable_columns(frame)
+    if not searchable:
+        return frame.head(0)
+    return frame.filter(
+        pl.any_horizontal(
+            [
+                pl.col(column).cast(pl.String).str.to_lowercase().fill_null("") == text
+                for column in searchable
+            ]
+        )
+    )
 
 
 def window(

@@ -11,7 +11,9 @@ import polars as pl
 import seaborn as sns
 from matplotlib.ticker import MaxNLocator
 
+from eu5gameparser.domain.buildings import load_building_data
 from eu5gameparser.savegame import notebook_analysis as ana
+from eu5gameparser.savegame.notebook_labels import NotebookLabelResolver
 from eu5gameparser.savegame.notebook_dataset import SavegameNotebookDataset
 
 
@@ -523,11 +525,248 @@ class SavegameWorkbench:
         band_plot(result.price_distribution, _time_axis(result.price_distribution), "price_p10", "price_p50", "price_p90", title="Food price distribution")
 
     def plot_buildings(self, result: BuildingResults) -> None:
-        slot_line_plots(
-            result.pm_slot_time_series,
-            "buildings",
-            title=f"{self.building_label} production method usage over time",
+        frame = _with_plot_slot_metadata(result.pm_slot_time_series, self.dataset)
+        return slot_line_plots(
+            frame,
+            "share",
+            slot=("building_label", "slot_label"),
+            title=f"{self.building_label} production method share over time",
         )
+
+    def plot_building_slot(self, result: BuildingResults, slot: int | str) -> None:
+        frame = _filter_plot_slot(_slot_plot_frame(result, self.dataset), slot)
+        if frame.is_empty():
+            try:
+                frame = _filter_plot_slot(_slot_plot_frame(self.buildings(), self.dataset), slot)
+            except Exception:
+                frame = frame.head(0)
+        if frame.is_empty():
+            return
+        return slot_line_plots(
+            frame,
+            "share",
+            slot=("building_label", "slot_label"),
+            title=f"{self.building_label} production method share over time",
+        )
+
+
+def _slot_plot_frame(
+    result: BuildingResults,
+    dataset: SavegameNotebookDataset,
+) -> pl.DataFrame:
+    return _with_plot_slot_metadata(result.pm_slot_time_series, dataset)
+
+
+def _with_plot_slot_metadata(
+    frame: pl.DataFrame,
+    dataset: SavegameNotebookDataset,
+) -> pl.DataFrame:
+    if frame.is_empty() or not {"building_label", "slot_label"}.issubset(frame.columns):
+        return frame
+    metadata = _plot_slot_metadata(dataset)
+    join_key = _plot_slot_join_key(frame, metadata)
+    if join_key is None:
+        return _with_plot_slot_share(frame)
+
+    joined = frame.join(
+        metadata.rename(
+            {
+                "slot_label": "_slot_label",
+                "production_method_group_index": "_production_method_group_index",
+            }
+        ),
+        on=join_key,
+        how="left",
+    )
+    updates: list[pl.Expr] = []
+    if "_slot_label" in joined.columns:
+        updates.append(
+            pl.when(
+                pl.col("_slot_label").is_not_null()
+                & (pl.col("_slot_label") != "Unslotted")
+            )
+            .then(pl.col("_slot_label"))
+            .otherwise(pl.col("slot_label"))
+            .alias("slot_label")
+        )
+    if "_production_method_group_index" in joined.columns:
+        if "production_method_group_index" in joined.columns:
+            updates.append(
+                pl.coalesce(
+                    "production_method_group_index",
+                    "_production_method_group_index",
+                ).alias("production_method_group_index")
+            )
+        else:
+            updates.append(
+                pl.col("_production_method_group_index").alias(
+                    "production_method_group_index"
+                )
+            )
+    if updates:
+        joined = joined.with_columns(updates)
+    drop_columns = [
+        column
+        for column in ("_slot_label", "_production_method_group_index")
+        if column in joined.columns
+    ]
+    if drop_columns:
+        joined = joined.drop(drop_columns)
+    return _with_plot_slot_share(joined)
+
+
+def _filter_plot_slot(frame: pl.DataFrame, slot: int | str) -> pl.DataFrame:
+    if frame.is_empty():
+        return frame
+    if isinstance(slot, int):
+        if "production_method_group_index" in frame.columns:
+            return frame.filter(pl.col("production_method_group_index") == slot)
+        if "slot_label" in frame.columns:
+            return frame.filter(pl.col("slot_label") == f"Slot {slot + 1}")
+        return frame.head(0)
+
+    text = str(slot).strip().lower()
+    if not text or "slot_label" not in frame.columns:
+        return frame.head(0)
+    return frame.filter(pl.col("slot_label").cast(pl.String).str.to_lowercase() == text)
+
+
+def _plot_slot_join_key(frame: pl.DataFrame, metadata: pl.DataFrame) -> str | None:
+    for column in ("production_method", "production_method_label"):
+        if column in frame.columns and column in metadata.columns:
+            return column
+    return None
+
+
+def _with_plot_slot_share(frame: pl.DataFrame) -> pl.DataFrame:
+    if "share" not in frame.columns or "buildings" not in frame.columns:
+        return frame
+    date_column = _time_axis(frame)
+    denominator = [
+        column
+        for column in (date_column, "building_label", "slot_label")
+        if column in frame.columns
+    ]
+    if not denominator:
+        return frame
+    return frame.with_columns(
+        (pl.col("buildings") / pl.sum("buildings").over(denominator)).alias("share")
+    )
+
+
+def _plot_slot_metadata(dataset: SavegameNotebookDataset) -> pl.DataFrame:
+    from_building_data = _plot_slot_metadata_from_building_data(dataset)
+    if not from_building_data.is_empty():
+        return from_building_data
+    return _plot_slot_metadata_from_dimensions(dataset)
+
+
+def _plot_slot_metadata_from_dimensions(dataset: SavegameNotebookDataset) -> pl.DataFrame:
+    try:
+        methods = dataset.dim("production_methods")
+    except (FileNotFoundError, KeyError, OSError, pl.exceptions.PolarsError):
+        return _empty_plot_slot_metadata()
+    required = {"production_method", "slot_label", "production_method_group_index"}
+    if methods.is_empty() or not required.issubset(methods.columns):
+        return _empty_plot_slot_metadata()
+    frame = methods
+    if "production_method_label" not in frame.columns:
+        frame = frame.with_columns(
+            pl.col("production_method")
+            .map_elements(lambda value: _label_from_key(value), return_dtype=pl.String)
+            .alias("production_method_label")
+        )
+    return frame.select(
+        [
+            "production_method",
+            "production_method_label",
+            "slot_label",
+            "production_method_group_index",
+        ]
+    ).unique("production_method", keep="first", maintain_order=True)
+
+
+def _plot_slot_metadata_from_building_data(dataset: SavegameNotebookDataset) -> pl.DataFrame:
+    if dataset.profile is None:
+        return _empty_plot_slot_metadata()
+    try:
+        data = load_building_data(
+            profile=dataset.profile,
+            load_order_path=dataset.load_order_path,
+        )
+        resolver = NotebookLabelResolver.from_profile(
+            profile=dataset.profile,
+            load_order_path=dataset.load_order_path,
+        )
+    except (FileNotFoundError, KeyError, OSError):
+        return _empty_plot_slot_metadata()
+    methods = data.production_methods
+    if methods.is_empty() or "name" not in methods.columns:
+        return _empty_plot_slot_metadata()
+    frame = methods.select(
+        [
+            pl.col("name").alias("production_method"),
+            (
+                pl.col("building")
+                if "building" in methods.columns
+                else pl.lit(None, dtype=pl.String)
+            ).alias("production_method_building"),
+            (
+                pl.col("production_method_group_index")
+                if "production_method_group_index" in methods.columns
+                else pl.lit(None, dtype=pl.Int64)
+            ).alias("production_method_group_index"),
+        ]
+    )
+    return frame.with_columns(
+        pl.col("production_method")
+        .map_elements(lambda value: resolver.label(value), return_dtype=pl.String)
+        .alias("production_method_label"),
+        pl.struct(["production_method_building", "production_method_group_index"])
+        .map_elements(
+            lambda row: _slot_label_from_metadata(row, resolver),
+            return_dtype=pl.String,
+        )
+        .alias("slot_label"),
+    ).select(
+        [
+            "production_method",
+            "production_method_label",
+            "slot_label",
+            "production_method_group_index",
+        ]
+    ).unique("production_method", keep="first", maintain_order=True)
+
+
+def _empty_plot_slot_metadata() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "production_method": pl.String,
+            "production_method_label": pl.String,
+            "slot_label": pl.String,
+            "production_method_group_index": pl.Int64,
+        }
+    )
+
+
+def _slot_label_from_metadata(
+    row: dict[str, object],
+    resolver: NotebookLabelResolver,
+) -> str:
+    group_index = row.get("production_method_group_index")
+    if group_index is None:
+        return "Unslotted"
+    index = int(group_index)
+    fallback = f"Slot {index + 1}"
+    building = row.get("production_method_building")
+    if building is None or str(building).strip() == "":
+        return fallback
+    return resolver.label(f"{building}_slot_{index}", fallback=fallback)
+
+
+def _label_from_key(value: object) -> str:
+    text = "" if value is None else str(value)
+    return " ".join(part for part in text.replace("-", "_").split("_") if part).title()
 
 
 def line_plot(frame: pl.DataFrame, x: str, y: str, *, hue: str | None = None, title: str = "") -> None:
@@ -550,21 +789,28 @@ def slot_line_plots(
     frame: pl.DataFrame,
     y: str,
     *,
-    slot: str = "slot_label",
+    slot: str | Sequence[str] = "slot_label",
     hue: str = "production_method_label",
     title: str = "",
-) -> None:
+) -> list[Any]:
     x = _time_axis(frame)
-    required = {x, y, slot, hue}
+    slot_columns = _column_list(slot)
+    required = {x, y, hue, *slot_columns}
     if frame.is_empty() or not required.issubset(frame.columns):
         print("No rows")
-        return
-    for slot_key, part in frame.sort([slot, x, hue]).partition_by(slot, as_dict=True).items():
+        return []
+    slot_partitions = frame.sort(
+        _slot_sort_columns(frame, slot_columns, x, hue)
+    ).partition_by(slot_columns, as_dict=True)
+    figures: list[Any] = []
+    for slot_key, part in slot_partitions.items():
         fig, ax = plt.subplots(figsize=(11, 4.5))
         for key, series in part.sort(x).partition_by(hue, as_dict=True).items():
             ax.plot(series[x].to_list(), series[y].to_list(), marker="o", linewidth=1.6, label=_label(key))
         ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
         _finish_line_axis(ax, x, f"{title} - {_label(slot_key)}" if title else _label(slot_key), x, y)
+        figures.append(fig)
+    return figures
 
 
 def slot_barh_plots(
@@ -642,7 +888,7 @@ def barh(frame: pl.DataFrame, x: str, y: str, *, title: str = "", top_n: int = 2
     ax.set_xlabel(x)
     ax.set_ylabel(y)
     plt.tight_layout()
-    plt.show()
+    _display_figure(fig)
 
 
 def heatmap(frame: pl.DataFrame, index: str, columns: str, values: str, *, title: str = "") -> None:
@@ -662,7 +908,7 @@ def heatmap(frame: pl.DataFrame, index: str, columns: str, values: str, *, title
     ax.set_xlabel(columns)
     ax.set_ylabel(index)
     plt.tight_layout()
-    plt.show()
+    _display_figure(fig)
 
 
 def _find_repo_root(start: Path | None = None) -> Path:
@@ -708,6 +954,36 @@ def _time_axis(frame: pl.DataFrame) -> str:
     return "year" if "year" in frame.columns else "date_sort"
 
 
+def _column_list(columns: str | Sequence[str]) -> list[str]:
+    if isinstance(columns, str):
+        return [columns]
+    return list(columns)
+
+
+def _slot_sort_columns(
+    frame: pl.DataFrame,
+    slot_columns: Sequence[str],
+    x: str,
+    hue: str,
+) -> list[str]:
+    names = set(frame.columns)
+    columns: list[str] = []
+    for column in slot_columns:
+        if (
+            column == "slot_label"
+            and "production_method_group_index" in names
+            and "production_method_group_index" not in slot_columns
+        ):
+            columns.append("production_method_group_index")
+        columns.append(column)
+    columns.extend([x, hue])
+    unique: list[str] = []
+    for column in columns:
+        if column in names and column not in unique:
+            unique.append(column)
+    return unique
+
+
 def _label(value: object) -> str:
     if isinstance(value, tuple):
         return " / ".join(str(part) for part in value)
@@ -721,4 +997,14 @@ def _finish_line_axis(ax: Any, x: str, title: str, xlabel: str, ylabel: str) -> 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     plt.tight_layout()
-    plt.show()
+    _display_figure(ax.figure)
+
+
+def _display_figure(fig: Any) -> None:
+    try:
+        from IPython.display import display
+    except ImportError:
+        plt.show()
+        return
+    display(fig)
+    plt.close(fig)
