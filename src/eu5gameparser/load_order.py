@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -184,6 +185,8 @@ def _host_path(path: Path) -> Path:
     path_text = str(path)
     match = re.match(r"^([A-Za-z]):[\\/](.*)$", path_text)
     if not match:
+        return path
+    if os.name == "nt":
         return path
     drive = match.group(1).lower()
     remainder = match.group(2).replace("\\", "/")

@@ -1033,6 +1033,81 @@ def test_workbench_pm_slot_views_ignore_pm_drilldown_search(tmp_path: Path, monk
     )
 
 
+def test_workbench_pm_slot_time_series_has_localized_cookery_slots(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "dataset"
+    _write_manifest(source, [_manifest_row("aaa", "s1", mtime_ns=10, year=1337)])
+    _write_location_snapshot(source, "aaa", "s1", 1337, [("north", 10.0)])
+    _write_table(
+        source,
+        "building_methods",
+        "aaa",
+        "s1",
+        [
+            _building_method("aaa", "s1", 1337, 1, 10, "cookery", "meal_a"),
+            _building_method("aaa", "s1", 1337, 1, 10, "cookery", "drink_a"),
+            _building_method("aaa", "s1", 1337, 1, 10, "cookery", "pack_a"),
+        ],
+    )
+    monkeypatch.setattr(
+        notebook_dataset,
+        "load_building_data",
+        lambda **_: type(
+            "BuildingData",
+            (),
+            {
+                "production_methods": pl.DataFrame(
+                    {
+                        "name": ["meal_a", "drink_a", "pack_a"],
+                        "building": ["cookery", "cookery", "cookery"],
+                        "production_method_group": ["cookery:0", "cookery:1", "cookery:2"],
+                        "production_method_group_index": [0, 1, 2],
+                    }
+                )
+            },
+        )(),
+    )
+    load_order = _write_load_order(
+        tmp_path,
+        vanilla_localization={},
+        mod_localization={
+            "cookery": "Cookery",
+            "meal_a": "Meal",
+            "drink_a": "Drink",
+            "pack_a": "Pack",
+            "cookery_slot_0": "Prepared Victuals",
+            "cookery_slot_1": "Ration Drink",
+            "cookery_slot_2": "Packing",
+        },
+    )
+    output = build_savegame_notebook_dataset(
+        source,
+        tmp_path / "out",
+        profile="constructor",
+        load_order_path=load_order,
+    ).output
+    (tmp_path / "constructor.toml").write_text('name = "test"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = wb.open_workbench(
+        wb.WorkbenchConfig(data_root=output, playthrough="aaa", building_search="cookery")
+    ).buildings()
+
+    assert (
+        result.pm_slot_time_series.select("production_method_group_index", "slot_label")
+        .unique()
+        .sort("production_method_group_index")
+        .to_dicts()
+        == [
+            {"production_method_group_index": 0, "slot_label": "Prepared Victuals"},
+            {"production_method_group_index": 1, "slot_label": "Ration Drink"},
+            {"production_method_group_index": 2, "slot_label": "Packing"},
+        ]
+    )
+
+
 def test_plot_buildings_uses_share_and_separates_building_slots(monkeypatch) -> None:
     titles: list[str] = []
     ylabels: list[str] = []

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from eu5gameparser.domain.buildings import load_building_data
 from eu5gameparser.domain.goods import load_goods_data
+from eu5gameparser import load_order as load_order_module
 from eu5gameparser.load_order import LoadOrderConfig
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "eu5"
@@ -88,6 +89,13 @@ merged_default = ["vanilla", "test_mod"]
 
     assert config.vanilla_root == Path("/mnt/c/Games/Europa Universalis V")
     assert config.mods["test_mod"].root == Path("/mnt/d/Mods/Test Mod")
+
+
+def test_windows_drive_paths_stay_native_on_windows(monkeypatch) -> None:
+    monkeypatch.setattr(load_order_module.os, "name", "nt")
+    path = Path(r"C:\Development\ProsperOrPerishConstructor\constructor.load_order.toml")
+
+    assert load_order_module._host_path(path) == path
 
 
 def test_mod_file_override_and_database_entry_modes(tmp_path: Path) -> None:
