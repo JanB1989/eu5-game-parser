@@ -45,6 +45,29 @@ POP_UNEMPLOYED_COLUMNS = tuple(f"unemployed_{pop_type}" for pop_type in POP_TYPE
 POP_TOTAL_COLUMNS = tuple(f"population_{pop_type}" for pop_type in POP_TYPES) + (
     "population_unknown",
 )
+MARKET_GOOD_BUCKET_COLUMNS = (
+    "demanded_Building",
+    "demanded_BurgherTrades",
+    "demanded_Construction",
+    "demanded_Consumption",
+    "demanded_Pops",
+    "demanded_Roads",
+    "demanded_Temporary",
+    "demanded_Trade",
+    "demanded_Units",
+    "supplied_BurgherTrades",
+    "supplied_Production",
+    "supplied_Trade",
+    "taken_Building",
+    "taken_BurgherTrades",
+    "taken_Construction",
+    "taken_Consumption",
+    "taken_Pops",
+    "taken_Roads",
+    "taken_Temporary",
+    "taken_Trade",
+    "taken_Units",
+)
 
 
 @dataclass(frozen=True)
@@ -1777,7 +1800,8 @@ def _market_goods_schema(category_columns: list[str]) -> dict[str, Any]:
         "last_month": pl.Float64,
         "locations_with_this_as_raw_material": pl.Float64,
     }
-    schema.update({column: pl.Float64 for column in category_columns})
+    bucket_columns = sorted(set(MARKET_GOOD_BUCKET_COLUMNS).union(category_columns))
+    schema.update({column: pl.Float64 for column in bucket_columns})
     return schema
 
 

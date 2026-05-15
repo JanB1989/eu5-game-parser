@@ -419,10 +419,9 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "Food Market" in html
     assert "Good Flow" in html
     assert "const payload =" in html
+    assert "function unpackPayload" in html
     assert '"foodMarkets":' in html
     assert '"populationPools":' in html
-    assert '"good_id": "masonry"' in html
-    assert '"production_method": "stone_bricks"' in html
     assert "function graphElements" in html
     assert "function renderOverviewGraph" in html
     assert "function renderFoodMarketTable" in html
@@ -462,7 +461,12 @@ def test_write_savegame_explorer_html_embeds_market_graph_data(tmp_path: Path) -
     assert "sort-header" in html
     assert "sort-indicator" in html
     assert "location_count" in html
+    transport_json = _embedded_payload_json(html)
+    transport = json.loads(transport_json)
+    assert _is_compact_table(transport["goods"])
+    assert _is_compact_table(transport["flows"])
     payload = _embedded_payload(html)
+    assert len(transport_json) < len(json.dumps(payload, ensure_ascii=False)) * 0.75
     assert "foodMarkets" in payload
     assert "bucketFlows" in payload
     assert "rgoFlows" in payload
@@ -586,11 +590,37 @@ def _fixture_eu5_data(tmp_path: Path):
     return load_eu5_data(profile="vanilla", load_order_path=_load_order_file(tmp_path))
 
 
-def _embedded_payload(html: str) -> dict:
+def _embedded_payload_json(html: str) -> str:
     marker = "    const payload = "
     start = html.index(marker) + len(marker)
-    end = html.index(";\n    const goods", start)
-    return json.loads(html[start:end])
+    end = html.index(";\n    unpackPayload(payload)", start)
+    return html[start:end]
+
+
+def _embedded_payload(html: str) -> dict:
+    return _decode_compact_payload(json.loads(_embedded_payload_json(html)))
+
+
+def _decode_compact_payload(payload: dict) -> dict:
+    return {
+        key: _decode_compact_table(value) if _is_compact_table(value) else value
+        for key, value in payload.items()
+    }
+
+
+def _decode_compact_table(value: list) -> list[dict]:
+    columns, rows = value
+    return [dict(zip(columns, row, strict=True)) for row in rows]
+
+
+def _is_compact_table(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], list)
+        and isinstance(value[1], list)
+        and all(isinstance(row, list) for row in value[1])
+    )
 
 
 def _graph_supply(payload: dict, good: str, market_id: int | None = None) -> float:

@@ -40,6 +40,28 @@ def _payload(tables: SavegameTables) -> dict[str, Any]:
     }
 
 
+def _compact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: _compact_rows(value) if isinstance(value, list) else value
+        for key, value in payload.items()
+    }
+
+
+def _compact_rows(rows: list[Any]) -> list[Any]:
+    if not rows or not all(isinstance(row, dict) for row in rows):
+        return rows
+
+    columns: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for column in row:
+            if column not in seen:
+                columns.append(column)
+                seen.add(column)
+
+    return [columns, [[row.get(column) for column in columns] for row in rows]]
+
+
 def _market_rows(markets: pl.DataFrame) -> list[dict[str, Any]]:
     if markets.is_empty():
         return []
@@ -282,6 +304,11 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     title = "EU5 Savegame Market Explorer"
     save_name = metadata.get("playthrough_name") or metadata.get("save_label") or "Savegame"
     save_date = metadata.get("date") or "unknown date"
+    compact_payload_json = json.dumps(
+        _compact_payload(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -611,7 +638,8 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     </main>
   </div>
   <script>
-    const payload = {json.dumps(payload, ensure_ascii=False)};
+    const payload = {compact_payload_json};
+    unpackPayload(payload);
     const goods = payload.goods || [];
     const markets = payload.markets || [];
     const foodMarkets = payload.foodMarkets || [];
@@ -620,6 +648,22 @@ def _standalone_html(payload: dict[str, Any]) -> str:
     const flows = payload.flows || [];
     const rgoFlows = payload.rgoFlows || [];
     const populationPools = payload.populationPools || [];
+    function unpackPayload(payload) {{
+      for (const [key, value] of Object.entries(payload)) {{
+        if (!isCompactTable(value)) continue;
+        const [columns, rows] = value;
+        payload[key] = rows.map(row => Object.fromEntries(
+          columns.map((column, index) => [column, row[index]])
+        ));
+      }}
+    }}
+    function isCompactTable(value) {{
+      return Array.isArray(value)
+        && value.length === 2
+        && Array.isArray(value[0])
+        && Array.isArray(value[1])
+        && value[1].every(row => Array.isArray(row));
+    }}
     const popColumns = [
       {{ key: "employed_nobles", label: "nobles" }},
       {{ key: "employed_clergy", label: "clergy" }},
